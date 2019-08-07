@@ -430,7 +430,7 @@ StatusOr<MountedApexData> mountNonFlattened(const ApexFile& apex,
   }
   std::string blockDevice = loopbackDevice.name;
   MountedApexData apex_data(loopbackDevice.name, apex.GetPath(), mountPoint,
-                            device_name);
+                            /* device_name = */ "");
 
   // for APEXes in immutable partitions, we don't need to mount them on
   // dm-verity because they are already in the dm-verity protected partition;
@@ -451,6 +451,7 @@ StatusOr<MountedApexData> mountNonFlattened(const ApexFile& apex,
                            << full_path << ": " << verityDevRes.ErrorMessage());
     }
     verityDev = std::move(*verityDevRes);
+    apex_data.device_name = device_name;
     blockDevice = verityDev.GetDevPath();
 
     Status readAheadStatus = loop::configureReadAhead(verityDev.GetDevPath());
@@ -1669,7 +1670,7 @@ int onBootstrap() {
                << preAllocate.ErrorMessage();
   }
 
-  Status status = collectApexKeys();
+  Status status = collectApexKeys({kApexPackageSystemDir});
   if (!status.Ok()) {
     LOG(ERROR) << "Failed to collect APEX keys : " << status.ErrorMessage();
     return 1;
@@ -1735,7 +1736,7 @@ void onStart(CheckpointInterface* checkpoint_service) {
     }
   }
 
-  Status status = collectApexKeys();
+  Status status = collectApexKeys(kApexPackageBuiltinDirs);
   if (!status.Ok()) {
     LOG(ERROR) << "Failed to collect APEX keys : " << status.ErrorMessage();
     return;
