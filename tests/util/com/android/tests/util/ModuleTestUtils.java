@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2019 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-package com.android.tests.apex;
+package com.android.tests.util;
 
 import com.android.tradefed.build.BuildInfoKey.BuildInfoFileKey;
 import com.android.tradefed.build.IBuildInfo;
+import com.android.tradefed.device.DeviceNotAvailableException;
 import com.android.tradefed.device.ITestDevice.ApexInfo;
 import com.android.tradefed.log.LogUtil.CLog;
 import com.android.tradefed.testtype.junit4.BaseHostJUnit4Test;
@@ -32,13 +33,22 @@ import org.junit.Assert;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
-class ApexTestUtils {
+public class ModuleTestUtils {
 
     private static final String APEX_INFO_EXTRACT_REGEX =
             ".*package:\\sname='(\\S+)\\'\\sversionCode='(\\d+)'\\s.*";
+
+    private static final Duration WAIT_FOR_SESSION_READY_TTL = Duration.ofSeconds(10);
+    private static final Duration SLEEP_FOR = Duration.ofMillis(200);
+
+    protected final Pattern mIsSessionReadyPattern = Pattern.compile("isStagedSessionReady = true");
+    protected final Pattern mIsSessionAppliedPattern =
+            Pattern.compile("isStagedSessionApplied = true;");
 
     private IRunUtil mRunUtil = new RunUtil();
     private BaseHostJUnit4Test mTest;
@@ -47,7 +57,7 @@ class ApexTestUtils {
         return mTest.getBuild();
     }
 
-    ApexTestUtils(BaseHostJUnit4Test test) {
+    public ModuleTestUtils(BaseHostJUnit4Test test) {
         mTest = test;
     }
 
@@ -56,7 +66,7 @@ class ApexTestUtils {
      *
      * @param apex input apex file to retrieve the info from
      */
-    ApexInfo getApexInfo(File apex) {
+    public ApexInfo getApexInfo(File apex) {
         String aaptOutput = runCmd(String.format(
                 "aapt dump badging %s", apex.getAbsolutePath()));
         String[] lines = aaptOutput.split("\n");
@@ -76,7 +86,7 @@ class ApexTestUtils {
      *
      * @param testFileName name of the file
      */
-    File getTestFile(String testFileName) throws IOException {
+    public File getTestFile(String testFileName) throws IOException {
         File testFile = null;
 
         String testcasesPath = System.getenv(EnvVariable.ANDROID_HOST_OUT_TESTCASES.toString());
@@ -96,25 +106,12 @@ class ApexTestUtils {
         }
 
         // Find the file in the buildinfo.
-        File tzdataFile = getBuild().getFile(testFileName);
-        if (tzdataFile != null) {
-            return tzdataFile;
+        File buildInfoFile = getBuild().getFile(testFileName);
+        if (buildInfoFile != null) {
+            return buildInfoFile;
         }
 
         throw new IOException("Cannot find " + testFileName);
-    }
-
-    /**
-     * Assert that a given string matches the a given regex.
-     *
-     * @param text the string
-     * @param pattern the regex
-     */
-    void assertMatchesRegex(String text, Pattern pattern) {
-        Matcher matcher = pattern.matcher(text);
-        Assert.assertTrue(
-                String.format("Not true that '%s' matches regexp '%s'", text, pattern),
-                matcher.find());
     }
 
     private String runCmd(String cmd) {
@@ -139,5 +136,35 @@ class ApexTestUtils {
             }
         }
         return null;
+    }
+
+    public void waitForStagedSessionReady() throws DeviceNotAvailableException {
+        // TODO: implement wait for session ready logic inside PackageManagerShellCommand instead.
+        boolean sessionReady = false;
+        Duration spentWaiting = Duration.ZERO;
+        while (spentWaiting.compareTo(WAIT_FOR_SESSION_READY_TTL) < 0) {
+            CommandResult res = mTest.getDevice().executeShellV2Command("pm get-stagedsessions");
+            Assert.assertEquals("", res.getStderr());
+            sessionReady = Stream.of(res.getStdout().split("\n")).anyMatch(this::isReadyNotApplied);
+            if (sessionReady) {
+                CLog.i("Done waiting after " + spentWaiting);
+                break;
+            }
+            try {
+                Thread.sleep(SLEEP_FOR.toMillis());
+                spentWaiting = spentWaiting.plus(SLEEP_FOR);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+        Assert.assertTrue("Staged session wasn't ready in " + WAIT_FOR_SESSION_READY_TTL,
+                sessionReady);
+    }
+
+    private boolean isReadyNotApplied(String sessionInfo) {
+        boolean isReady = mIsSessionReadyPattern.matcher(sessionInfo).find();
+        boolean isApplied = mIsSessionAppliedPattern.matcher(sessionInfo).find();
+        return isReady && !isApplied;
     }
 }
