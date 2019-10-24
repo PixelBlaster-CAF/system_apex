@@ -21,8 +21,8 @@
 
 #include "apex_database.h"
 #include "apex_file.h"
-#include "apex_key.h"
 #include "apex_manifest.h"
+#include "apex_preinstalled_data.h"
 #include "apex_shim.h"
 #include "apexd_checkpoint.h"
 #include "apexd_loop.h"
@@ -98,6 +98,8 @@ static constexpr const char* kApexStatusSysprop = "apexd.status";
 static constexpr const char* kApexStatusStarting = "starting";
 static constexpr const char* kApexStatusReady = "ready";
 
+static constexpr const char* kBuildFingerprintSysprop = "ro.build.fingerprint";
+
 static constexpr const char* kApexVerityOnSystemProp =
     "persist.apexd.verity_on_system";
 static bool gForceDmVerityOnSystem =
@@ -114,9 +116,6 @@ bool gSupportsFsCheckpoints = false;
 bool gInFsCheckpointMode = false;
 
 static constexpr size_t kLoopDeviceSetupAttempts = 3u;
-
-static const bool kUpdatable =
-    android::sysprop::ApexProperties::updatable().value_or(false);
 
 bool gBootstrap = false;
 static const std::vector<const std::string> kBootstrapApexes = {
@@ -154,12 +153,11 @@ Result<void> preAllocateLoopDevices() {
     }
   }
 
-  // note: do not call preAllocateLoopDevices() if size == 0
-  // or the device does not support updatable APEX.
+  // note: do not call preAllocateLoopDevices() if size == 0.
   // For devices (e.g. ARC) which doesn't support loop-control
   // preAllocateLoopDevices() can cause problem when it tries
   // to access /dev/loop-control.
-  if (size == 0 || !kUpdatable) {
+  if (size == 0) {
     return {};
   }
   return loop::preAllocateLoopDevices(size);
@@ -709,11 +707,6 @@ Result<void> VerifyPackageInstall(const ApexFile& apex_file) {
   if (!verify_package_boot_status) {
     return verify_package_boot_status;
   }
-  if (!kUpdatable) {
-    return Error() << "Attempted to upgrade apex package "
-                   << apex_file.GetPath()
-                   << " on a device that doesn't support it";
-  }
   Result<ApexVerityData> verity_or = apex_file.VerifyApexVerity();
 
   constexpr const auto kSuccessFn = [](const std::string& /*mount_point*/) {
@@ -1094,9 +1087,6 @@ Result<void> activatePackageImpl(const ApexFile& apex_file) {
   if (gBootstrap && !isBootstrapApex(apex_file)) {
     LOG(INFO) << "Skipped when bootstrapping";
     return {};
-  } else if (!kUpdatable && !gBootstrap && isBootstrapApex(apex_file)) {
-    LOG(INFO) << "Package already activated in bootstrap";
-    return {};
   }
 
   // See whether we think it's active, and do not allow to activate the same
@@ -1325,6 +1315,7 @@ Result<void> scanPackagesDirAndActivate(const char* apex_package_dir) {
 }
 
 void scanStagedSessionsDirAndStage() {
+  using android::base::GetProperty;
   LOG(INFO) << "Scanning " << kApexSessionsDir
             << " looking for sessions to be activated.";
 
@@ -1341,6 +1332,12 @@ void scanStagedSessionsDirAndStage() {
       }
     };
     auto scope_guard = android::base::make_scope_guard(session_failed_fn);
+
+    std::string build_fingerprint = GetProperty(kBuildFingerprintSysprop, "");
+    if (session.GetBuildFingerprint().compare(build_fingerprint) != 0) {
+      LOG(ERROR) << "APEX build fingerprint has changed";
+      continue;
+    }
 
     std::vector<std::string> dirsToScan;
     if (session.GetChildSessionIds().empty()) {
@@ -1577,7 +1574,7 @@ int onBootstrap() {
                << preAllocate.error();
   }
 
-  Result<void> status = collectApexKeys({kApexPackageSystemDir});
+  Result<void> status = collectPreinstalledData({kApexPackageSystemDir});
   if (!status) {
     LOG(ERROR) << "Failed to collect APEX keys : " << status.error();
     return 1;
@@ -1703,7 +1700,7 @@ void onStart(CheckpointInterface* checkpoint_service) {
     }
   }
 
-  Result<void> status = collectApexKeys(kApexPackageBuiltinDirs);
+  Result<void> status = collectPreinstalledData(kApexPackageBuiltinDirs);
   if (!status) {
     LOG(ERROR) << "Failed to collect APEX keys : " << status.error();
     return;
@@ -1764,6 +1761,7 @@ void onAllPackagesReady() {
 
 Result<std::vector<ApexFile>> submitStagedSession(
     const int session_id, const std::vector<int>& child_session_ids) {
+  using android::base::GetProperty;
   bool needsBackup = true;
   Result<void> cleanup_status = ClearSessions();
   if (!cleanup_status) {
@@ -1818,6 +1816,8 @@ Result<std::vector<ApexFile>> submitStagedSession(
     return session.error();
   }
   (*session).SetChildSessionIds(child_session_ids);
+  std::string build_fingerprint = GetProperty(kBuildFingerprintSysprop, "");
+  (*session).SetBuildFingerprint(build_fingerprint);
   Result<void> commit_status =
       (*session).UpdateStateAndCommit(SessionState::VERIFIED);
   if (!commit_status) {

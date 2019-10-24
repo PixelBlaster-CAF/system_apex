@@ -563,6 +563,20 @@ TEST_F(ApexServiceTest,
   }
 }
 
+TEST_F(ApexServiceTest, SubmitStagedSessionStoresBuildFingerprint) {
+  PrepareTestApexForInstall installer(GetTestFile("apex.apexd_test.apex"),
+                                      "/data/app-staging/session_1547",
+                                      "staging_data_file");
+  if (!installer.Prepare()) {
+    return;
+  }
+  ApexInfoList list;
+  ASSERT_TRUE(IsOk(service_->submitStagedSession(1547, {}, &list)));
+
+  auto session = ApexSession::GetSession(1547);
+  ASSERT_FALSE(session->GetBuildFingerprint().empty());
+}
+
 TEST_F(ApexServiceTest, SubmitStagedSessionFailDoesNotLeakTempVerityDevices) {
   using android::dm::DeviceMapper;
 
@@ -924,6 +938,8 @@ TEST_F(ApexSameGradeOfPreInstalledVersionTest, VersionOnDataWins) {
   ApexInfo on_data;
   on_data.moduleName = "com.android.apex.cts.shim";
   on_data.modulePath = "/data/apex/active/com.android.apex.cts.shim@1.apex";
+  on_data.preinstalledModulePath =
+      "/system/apex/com.android.apex.cts.shim.apex";
   on_data.versionCode = 1;
   on_data.isFactory = false;
   on_data.isActive = true;
@@ -931,6 +947,8 @@ TEST_F(ApexSameGradeOfPreInstalledVersionTest, VersionOnDataWins) {
   ApexInfo preinstalled;
   preinstalled.moduleName = "com.android.apex.cts.shim";
   preinstalled.modulePath = "/system/apex/com.android.apex.cts.shim.apex";
+  preinstalled.preinstalledModulePath =
+      "/system/apex/com.android.apex.cts.shim.apex";
   preinstalled.versionCode = 1;
   preinstalled.isFactory = true;
   preinstalled.isActive = false;
@@ -1955,6 +1973,8 @@ class ApexShimUpdateTest : public ApexServiceTest {
     ApexInfo expected;
     expected.moduleName = "com.android.apex.cts.shim";
     expected.modulePath = "/system/apex/com.android.apex.cts.shim.apex";
+    expected.preinstalledModulePath =
+        "/system/apex/com.android.apex.cts.shim.apex";
     expected.versionCode = 1;
     expected.isFactory = true;
     expected.isActive = true;
