@@ -30,7 +30,8 @@ interface IApexService {
    ApexInfo[] getActivePackages();
    ApexInfo[] getAllPackages();
 
-   void abortActiveSession();
+   void abortStagedSession(int session_id);
+   void revertActiveSessions();
 
    void unstagePackages(in @utf8InCpp List<String> active_package_paths);
 
@@ -69,10 +70,5 @@ interface IApexService {
     * Not meant for use outside of testing. The call will not be
     * functional on user builds.
     */
-   void rollbackActiveSession();
-   /**
-    * Not meant for use outside of testing. The call will not be
-    * functional on user builds.
-    */
-   void resumeRollbackIfNeeded();
+   void resumeRevertIfNeeded();
 }
