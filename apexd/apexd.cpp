@@ -102,11 +102,6 @@ static constexpr const char* kApexStatusReady = "ready";
 
 static constexpr const char* kBuildFingerprintSysprop = "ro.build.fingerprint";
 
-static constexpr const char* kApexVerityOnSystemProp =
-    "persist.apexd.verity_on_system";
-static bool gForceDmVerityOnSystem =
-    android::base::GetBoolProperty(kApexVerityOnSystemProp, false);
-
 // This should be in UAPI, but it's not :-(
 static constexpr const char* kDmVerityRestartOnCorruption =
     "restart_on_corruption";
@@ -405,14 +400,14 @@ Result<MountedApexData> MountPackageImpl(const ApexFile& apex,
   }
   std::string blockDevice = loopbackDevice.name;
   MountedApexData apex_data(loopbackDevice.name, apex.GetPath(), mountPoint,
-                            /* device_name = */ "");
+                            /* device_name = */ "",
+                            /* hashtree_loop_name = */ "");
 
   // for APEXes in immutable partitions, we don't need to mount them on
   // dm-verity because they are already in the dm-verity protected partition;
   // system. However, note that we don't skip verification to ensure that APEXes
   // are correctly signed.
-  const bool mountOnVerity =
-      gForceDmVerityOnSystem || !isPathForBuiltinApexes(full_path);
+  const bool mountOnVerity = !isPathForBuiltinApexes(full_path);
   DmVerityDevice verityDev;
   loop::LoopbackDeviceUniqueFd loop_for_hash;
   if (mountOnVerity) {
@@ -424,6 +419,7 @@ Result<MountedApexData> MountPackageImpl(const ApexFile& apex,
       }
       loop_for_hash = std::move(*hash_tree);
       hash_device = loop_for_hash.name;
+      apex_data.hashtree_loop_name = hash_device;
     }
     auto verityTable =
         createVerityTable(*verityData, loopbackDevice.name, hash_device,
@@ -474,7 +470,6 @@ Result<MountedApexData> MountPackageImpl(const ApexFile& apex,
     verityDev.Release();
     loopbackDevice.CloseGood();
     loop_for_hash.CloseGood();
-    // TODO(b/120058143): Add loop_fo_hash to apex_data to clean up on unmount.
 
     scope_guard.Disable();  // Accept the mount.
     return apex_data;
@@ -529,12 +524,14 @@ Result<void> Unmount(const MountedApexData& data) {
   }
 
   // Try to free up the loop device.
+  auto log_fn = [](const std::string& path, const std::string& /*id*/) {
+    LOG(VERBOSE) << "Freeing loop device " << path << " for unmount.";
+  };
   if (!data.loop_name.empty()) {
-    auto log_fn = [](const std::string& path,
-                     const std::string& id ATTRIBUTE_UNUSED) {
-      LOG(VERBOSE) << "Freeing loop device " << path << " for unmount.";
-    };
     loop::DestroyLoopDevice(data.loop_name, log_fn);
+  }
+  if (!data.hashtree_loop_name.empty()) {
+    loop::DestroyLoopDevice(data.hashtree_loop_name, log_fn);
   }
 
   return {};
@@ -1165,6 +1162,56 @@ Result<void> scanPackagesDirAndActivate(const char* apex_package_dir) {
   return {};
 }
 
+/**
+ * Snapshots data from base_dir/apexdata/<apex name> to
+ * base_dir/apexrollback/<rollback id>/<apex name>.
+ */
+Result<void> snapshotDataDirectory(const std::string& base_dir,
+                                   const int rollback_id,
+                                   const ApexFile& apex_file) {
+  namespace fs = std::filesystem;
+
+  auto rollback_path = StringPrintf("%s/%s/%d", base_dir.c_str(),
+                                    kApexSnapshotSubDir, rollback_id);
+  const Result<void> result = createDirIfNeeded(rollback_path, 0700);
+  if (!result) {
+    return Error() << "Failed to create snapshot directory for rollback "
+                   << rollback_id << " : " << result.error();
+  }
+
+  auto apex_name = apex_file.GetManifest().name();
+  auto to_path =
+      StringPrintf("%s/%s", rollback_path.c_str(), apex_name.c_str());
+
+  std::error_code error_code;
+  fs::remove_all(to_path, error_code);
+  if (error_code) {
+    return Error() << "Failed to delete snapshot for " << apex_name << " : "
+                   << error_code.message();
+  }
+
+  auto deleter = [&] {
+    std::error_code error_code;
+    fs::remove_all(to_path, error_code);
+    if (error_code) {
+      LOG(ERROR) << "Failed to clean up snapshot for " << apex_name << " : "
+                 << error_code.message();
+    }
+  };
+  auto scope_guard = android::base::make_scope_guard(deleter);
+
+  auto from_path = StringPrintf("%s/%s/%s", base_dir.c_str(), kApexDataSubDir,
+                                apex_name.c_str());
+  fs::copy(from_path, to_path, fs::copy_options::recursive, error_code);
+  if (error_code) {
+    return Error() << "Failed to copy snapshot for " << apex_name << " : "
+                   << " from [" << from_path << "] to [" << to_path
+                   << "] :" << error_code.message();
+  }
+  scope_guard.Disable();
+  return {};
+}
+
 void scanStagedSessionsDirAndStage() {
   using android::base::GetProperty;
   LOG(INFO) << "Scanning " << kApexSessionsDir
@@ -1238,6 +1285,22 @@ void scanStagedSessionsDirAndStage() {
                  << std::to_string(sessionId) << ": "
                  << postinstall_status.error();
       continue;
+    }
+
+    if (session.HasRollbackEnabled()) {
+      for (const auto& apex : apexes) {
+        Result<ApexFile> apex_file = ApexFile::Open(apex);
+        if (!apex_file) {
+          LOG(ERROR) << "Cannot open apex for snapshot: " << apex;
+          continue;
+        }
+        Result<void> result = snapshotDataDirectory(
+            kDeSysDataDir, session.GetRollbackId(), *apex_file);
+        if (!result) {
+          LOG(ERROR) << "Snapshot failed for " << apex << ": "
+                     << result.error();
+        }
+      }
     }
 
     const Result<void> result = stagePackages(apexes);
@@ -1421,16 +1484,20 @@ void revertAllStagedSessions() {
  * so that they do not get activated on next reboot.
  */
 Result<void> revertActiveSessions() {
+  // First check whenever there is anything to revert. If there is none, then
+  // fail. This prevents apexd from boot looping a device in case a native
+  // process is crashing and there are no apex updates.
+  auto activeSessions = ApexSession::GetActiveSessions();
+  if (activeSessions.empty()) {
+    return Error() << "Revert requested, when there are no active sessions.";
+  }
+
   if (gInFsCheckpointMode) {
     LOG(DEBUG) << "Checkpoint mode is enabled";
     // On checkpointing devices, our modifications on /data will be
     // automatically reverted when we abort changes. Updating the session
     // state is pointless here, as it will be reverted as well.
     return {};
-  }
-  auto activeSessions = ApexSession::GetActiveSessions();
-  if (activeSessions.empty()) {
-    return Error() << "Revert requested, when there are no active sessions.";
   }
 
   for (auto& session : activeSessions) {
@@ -1678,8 +1745,15 @@ void onAllPackagesReady() {
 }
 
 Result<std::vector<ApexFile>> submitStagedSession(
-    const int session_id, const std::vector<int>& child_session_ids) {
+    const int session_id, const std::vector<int>& child_session_ids,
+    const bool has_rollback_enabled, const bool is_rollback,
+    const int rollback_id) {
   using android::base::GetProperty;
+
+  if (session_id == 0) {
+    return Error() << "Session id was not provided.";
+  }
+
   bool needsBackup = true;
 
   if (gSupportsFsCheckpoints) {
@@ -1725,6 +1799,11 @@ Result<std::vector<ApexFile>> submitStagedSession(
     return preinstall_status.error();
   }
 
+  if (has_rollback_enabled && is_rollback) {
+    return Error() << "Cannot set session " << session_id << " as both a"
+                   << " rollback and enabled for rollback.";
+  }
+
   auto session = ApexSession::CreateSession(session_id);
   if (!session) {
     return session.error();
@@ -1732,6 +1811,9 @@ Result<std::vector<ApexFile>> submitStagedSession(
   (*session).SetChildSessionIds(child_session_ids);
   std::string build_fingerprint = GetProperty(kBuildFingerprintSysprop, "");
   (*session).SetBuildFingerprint(build_fingerprint);
+  session->SetHasRollbackEnabled(has_rollback_enabled);
+  session->SetIsRollback(is_rollback);
+  session->SetRollbackId(rollback_id);
   Result<void> commit_status =
       (*session).UpdateStateAndCommit(SessionState::VERIFIED);
   if (!commit_status) {

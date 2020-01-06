@@ -14,24 +14,12 @@
  * limitations under the License.
  */
 
-#include "apex_file.h"
+package android.apex;
 
-#include <android-base/result.h>
-
-namespace android {
-namespace apex {
-namespace shim {
-
-constexpr const char* kSystemShimApexName = "com.android.apex.cts.shim.apex";
-
-bool IsShimApex(const ApexFile& apex_file);
-
-android::base::Result<void> ValidateShimApex(const std::string& mount_point,
-                                             const ApexFile& apex_file);
-
-android::base::Result<void> ValidateUpdate(const std::string& system_apex_path,
-                                           const std::string& new_apex_path);
-
-}  // namespace shim
-}  // namespace apex
-}  // namespace android
+parcelable ApexSessionParams {
+    int sessionId = 0;
+    int[] childSessionIds = {};
+    boolean hasRollbackEnabled = false;
+    boolean isRollback = false;
+    int rollbackId = 0;
+}

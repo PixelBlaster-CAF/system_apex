@@ -10,16 +10,34 @@
       "name": "conscrypt_e2e_tests"
     },
     {
+      "name": "cronet_e2e_tests"
+    },
+    {
       "name": "neuralnetworks_e2e_tests"
     },
     {
       "name": "permission_e2e_tests"
     },
     {
+      "name": "statsd_e2e_tests"
+    },
+    {
+      "name": "telephony_e2e_tests"
+    },
+    {
       "name": "timezone_data_e2e_tests"
     },
     {
       "name": "ipsec_e2e_tests"
+    },
+    {
+      "name": "wifi_e2e_tests"
+    },
+    {
+      "name": "mediaprovider_e2e_tests"
+    },
+    {
+      "name": "cellbroadcast_e2e_tests"
     }
   ],
   // The following changes are in post-submit to restrict to physical
