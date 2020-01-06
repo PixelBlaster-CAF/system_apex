@@ -13,7 +13,13 @@
       "name": "neuralnetworks_e2e_tests"
     },
     {
+      "name": "permission_e2e_tests"
+    },
+    {
       "name": "timezone_data_e2e_tests"
+    },
+    {
+      "name": "ipsec_e2e_tests"
     }
   ],
   // The following changes are in post-submit to restrict to physical
