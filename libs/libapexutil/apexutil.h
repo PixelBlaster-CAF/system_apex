@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 The Android Open Source Project
+ * Copyright (C) 2020 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,29 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
 
+#include <map>
 #include <string>
 
-#include "apex_file.h"
+#include <apex_manifest.pb.h>
 
 namespace android {
 namespace apex {
 
-enum PrepareHashTreeResult {
-  kReuse = 0,
-  KRegenerate = 1,
-};
+// Returns active APEX packages as a map of path(e.g. /apex/com.android.foo) to
+// ApexManifest. This is very similar to ApexService::getActivePackages, but it
+// doesn't rely on whether APEXes are flattened or not.
+// For testing purpose, it accepts the apex root path which is defined by
+// kApexRoot constant.
+std::map<std::string, ::apex::proto::ApexManifest>
+GetActivePackages(const std::string &apex_root);
 
-// Generates a dm-verity hashtree of a given |apex| if |hashtree_file| doesn't
-// exist or it's root_digest doesn't match |verity_data.root_digest|. Otherwise
-// does nothing.
-android::base::Result<PrepareHashTreeResult> PrepareHashTree(
-    const ApexFile& apex, const ApexVerityData& verity_data,
-    const std::string& hashtree_file);
+constexpr const char *const kApexRoot = "/apex";
 
-void RemoveObsoleteHashTrees();
-
-}  // namespace apex
-}  // namespace android
+} // namespace apex
+} // namespace android

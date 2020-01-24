@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "apexd"
-
 #include "apexd.h"
 #include "apexd_private.h"
 
@@ -75,6 +73,7 @@
 using android::base::ErrnoError;
 using android::base::Error;
 using android::base::Errorf;
+using android::base::GetProperty;
 using android::base::Join;
 using android::base::ReadFully;
 using android::base::Result;
@@ -123,7 +122,7 @@ static const std::vector<std::string> kBootstrapApexes = ([]() {
       "com.android.tzdata",
   };
 
-  if (auto ver = android::base::GetProperty("ro.vndk.version", ""); ver != "") {
+  if (auto ver = GetProperty("ro.vndk.version", ""); ver != "") {
     ret.push_back("com.android.vndk.v" + ver);
   }
   return ret;
@@ -413,11 +412,14 @@ Result<MountedApexData> MountPackageImpl(const ApexFile& apex,
   if (mountOnVerity) {
     std::string hash_device = loopbackDevice.name;
     if (verityData->desc->tree_size == 0) {
-      auto hash_tree = GetHashTree(apex, *verityData, hashtree_file);
-      if (!hash_tree) {
-        return hash_tree.error();
+      if (auto st = PrepareHashTree(apex, *verityData, hashtree_file); !st) {
+        return st.error();
       }
-      loop_for_hash = std::move(*hash_tree);
+      auto create_loop_status = loop::createLoopDevice(hashtree_file, 0, 0);
+      if (!create_loop_status) {
+        return create_loop_status.error();
+      }
+      loop_for_hash = std::move(*create_loop_status);
       hash_device = loop_for_hash.name;
       apex_data.hashtree_loop_name = hash_device;
     }
@@ -930,7 +932,7 @@ Result<void> resumeRevertIfNeeded() {
   if (sessions.empty()) {
     return {};
   }
-  return revertActiveSessions();
+  return revertActiveSessions("");
 }
 
 Result<void> activatePackageImpl(const ApexFile& apex_file) {
@@ -1168,9 +1170,7 @@ Result<void> scanPackagesDirAndActivate(const char* apex_package_dir) {
  */
 Result<void> snapshotDataDirectory(const std::string& base_dir,
                                    const int rollback_id,
-                                   const ApexFile& apex_file) {
-  namespace fs = std::filesystem;
-
+                                   const std::string& apex_name) {
   auto rollback_path = StringPrintf("%s/%s/%d", base_dir.c_str(),
                                     kApexSnapshotSubDir, rollback_id);
   const Result<void> result = createDirIfNeeded(rollback_path, 0700);
@@ -1178,42 +1178,65 @@ Result<void> snapshotDataDirectory(const std::string& base_dir,
     return Error() << "Failed to create snapshot directory for rollback "
                    << rollback_id << " : " << result.error();
   }
-
-  auto apex_name = apex_file.GetManifest().name();
+  auto from_path = StringPrintf("%s/%s/%s", base_dir.c_str(), kApexDataSubDir,
+                                apex_name.c_str());
   auto to_path =
       StringPrintf("%s/%s", rollback_path.c_str(), apex_name.c_str());
 
-  std::error_code error_code;
-  fs::remove_all(to_path, error_code);
-  if (error_code) {
-    return Error() << "Failed to delete snapshot for " << apex_name << " : "
-                   << error_code.message();
-  }
+  return ReplaceFiles(from_path, to_path);
+}
 
-  auto deleter = [&] {
-    std::error_code error_code;
-    fs::remove_all(to_path, error_code);
-    if (error_code) {
-      LOG(ERROR) << "Failed to clean up snapshot for " << apex_name << " : "
-                 << error_code.message();
+/**
+ * Restores snapshot from base_dir/apexrollback/<rollback id>/<apex name>
+ * to base_dir/apexdata/<apex name>.
+ */
+Result<void> restoreDataDirectory(const std::string& base_dir,
+                                  const int rollback_id,
+                                  const std::string& apex_name) {
+  auto from_path =
+      StringPrintf("%s/%s/%d/%s", base_dir.c_str(), kApexSnapshotSubDir,
+                   rollback_id, apex_name.c_str());
+  auto to_path = StringPrintf("%s/%s/%s", base_dir.c_str(), kApexDataSubDir,
+                              apex_name.c_str());
+  return ReplaceFiles(from_path, to_path);
+}
+
+void snapshotOrRestoreIfNeeded(const ApexSession& session,
+                               const std::vector<std::string>& apexes) {
+  if (session.HasRollbackEnabled()) {
+    for (const auto& apex : apexes) {
+      Result<ApexFile> apex_file = ApexFile::Open(apex);
+      if (!apex_file) {
+        LOG(ERROR) << "Cannot open apex for snapshot: " << apex;
+        continue;
+      }
+      auto apex_name = apex_file->GetManifest().name();
+      Result<void> result = snapshotDataDirectory(
+          kDeSysDataDir, session.GetRollbackId(), apex_name);
+      if (!result) {
+        LOG(ERROR) << "Snapshot failed for " << apex << ": " << result.error();
+      }
     }
-  };
-  auto scope_guard = android::base::make_scope_guard(deleter);
-
-  auto from_path = StringPrintf("%s/%s/%s", base_dir.c_str(), kApexDataSubDir,
-                                apex_name.c_str());
-  fs::copy(from_path, to_path, fs::copy_options::recursive, error_code);
-  if (error_code) {
-    return Error() << "Failed to copy snapshot for " << apex_name << " : "
-                   << " from [" << from_path << "] to [" << to_path
-                   << "] :" << error_code.message();
+  } else if (session.IsRollback()) {
+    for (const auto& apex : apexes) {
+      Result<ApexFile> apex_file = ApexFile::Open(apex);
+      if (!apex_file) {
+        LOG(ERROR) << "Cannot open apex for restore of data: " << apex;
+        continue;
+      }
+      auto apex_name = apex_file->GetManifest().name();
+      // TODO: Back up existing files in case rollback is reverted.
+      Result<void> result = restoreDataDirectory(
+          kDeSysDataDir, session.GetRollbackId(), apex_name);
+      if (!result) {
+        LOG(ERROR) << "Restore of data failed for " << apex << ": "
+                   << result.error();
+      }
+    }
   }
-  scope_guard.Disable();
-  return {};
 }
 
 void scanStagedSessionsDirAndStage() {
-  using android::base::GetProperty;
   LOG(INFO) << "Scanning " << kApexSessionsDir
             << " looking for sessions to be activated.";
 
@@ -1287,21 +1310,7 @@ void scanStagedSessionsDirAndStage() {
       continue;
     }
 
-    if (session.HasRollbackEnabled()) {
-      for (const auto& apex : apexes) {
-        Result<ApexFile> apex_file = ApexFile::Open(apex);
-        if (!apex_file) {
-          LOG(ERROR) << "Cannot open apex for snapshot: " << apex;
-          continue;
-        }
-        Result<void> result = snapshotDataDirectory(
-            kDeSysDataDir, session.GetRollbackId(), *apex_file);
-        if (!result) {
-          LOG(ERROR) << "Snapshot failed for " << apex << ": "
-                     << result.error();
-        }
-      }
-    }
+    snapshotOrRestoreIfNeeded(session, apexes);
 
     const Result<void> result = stagePackages(apexes);
     if (!result) {
@@ -1483,7 +1492,7 @@ void revertAllStagedSessions() {
  * Also, we need to put staged sessions in /data/apex/sessions in REVERTED state
  * so that they do not get activated on next reboot.
  */
-Result<void> revertActiveSessions() {
+Result<void> revertActiveSessions(const std::string& crashing_native_process) {
   // First check whenever there is anything to revert. If there is none, then
   // fail. This prevents apexd from boot looping a device in case a native
   // process is crashing and there are no apex updates.
@@ -1501,6 +1510,9 @@ Result<void> revertActiveSessions() {
   }
 
   for (auto& session : activeSessions) {
+    if (!crashing_native_process.empty()) {
+      session.SetCrashingNativeProcess(crashing_native_process);
+    }
     auto status =
         session.UpdateStateAndCommit(SessionState::REVERT_IN_PROGRESS);
     if (!status) {
@@ -1534,8 +1546,9 @@ Result<void> revertActiveSessions() {
   return {};
 }
 
-Result<void> revertActiveSessionsAndReboot() {
-  auto status = revertActiveSessions();
+Result<void> revertActiveSessionsAndReboot(
+    const std::string& crashing_native_process) {
+  auto status = revertActiveSessions(crashing_native_process);
   if (!status) {
     return status;
   }
@@ -1705,7 +1718,7 @@ void onStart(CheckpointInterface* checkpoint_service) {
   if (!status) {
     LOG(ERROR) << "Failed to activate packages from "
                << kActiveApexPackagesDataDir << " : " << status.error();
-    Result<void> revert_status = revertActiveSessionsAndReboot();
+    Result<void> revert_status = revertActiveSessionsAndReboot("");
     if (!revert_status) {
       // TODO: should we kill apexd in this case?
       LOG(ERROR) << "Failed to revert : " << revert_status.error();
@@ -1748,31 +1761,15 @@ Result<std::vector<ApexFile>> submitStagedSession(
     const int session_id, const std::vector<int>& child_session_ids,
     const bool has_rollback_enabled, const bool is_rollback,
     const int rollback_id) {
-  using android::base::GetProperty;
 
   if (session_id == 0) {
     return Error() << "Session id was not provided.";
   }
 
-  bool needsBackup = true;
-
-  if (gSupportsFsCheckpoints) {
-    Result<void> checkpoint_status =
-        gVoldService->StartCheckpoint(kNumRetriesWhenCheckpointingEnabled);
-    if (!checkpoint_status) {
-      // The device supports checkpointing, but we could not start it;
-      // log a warning, but do continue, since we can live without it.
-      LOG(WARNING) << "Failed to start filesystem checkpoint on device that "
-                      "should support it: "
-                   << checkpoint_status.error();
-    } else {
-      needsBackup = false;
-    }
-  }
-
-  if (needsBackup) {
+  if (!gSupportsFsCheckpoints) {
     Result<void> backup_status = BackupActivePackages();
     if (!backup_status) {
+      // Do not proceed with staged install without backup
       return backup_status.error();
     }
   }
