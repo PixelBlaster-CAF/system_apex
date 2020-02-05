@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,10 @@ def ParseArgs(argv):
       help='path to the public key file. Used to bundle the public key in APEX for testing.'
   )
   parser.add_argument(
+      '--signing_args',
+      help='the extra signing arguments passed to avbtool. Used for "image" APEXs.'
+  )
+  parser.add_argument(
       'input_dir',
       metavar='INPUT_DIR',
       help='the directory having files to be packaged')
@@ -114,6 +119,10 @@ def ParseArgs(argv):
       '--target_sdk_version',
       required=False,
       help='Default target SDK version to use for AndroidManifest.xml')
+  parser.add_argument(
+      '--min_sdk_version',
+      required=False,
+      help='Default Min SDK version to use for AndroidManifest.xml')
   parser.add_argument(
       '--do_not_check_keyname',
       required=False,
@@ -282,6 +291,21 @@ def ValidateArgs(args):
           print('Missing ----canned_fs_config {config} argument, or a --build_info argument!')
           return False
 
+  if not args.target_sdk_version:
+    if build_info is not None:
+      if build_info.target_sdk_version:
+        args.target_sdk_version = build_info.target_sdk_version
+
+  if not args.no_hashtree:
+    if build_info is not None:
+      if build_info.no_hashtree:
+        args.no_hashtree = True
+
+  if not args.min_sdk_version:
+    if build_info is not None:
+      if build_info.min_sdk_version:
+        args.min_sdk_version = build_info.min_sdk_version
+
   return True
 
 def GenerateBuildInfo(args):
@@ -297,6 +321,15 @@ def GenerateBuildInfo(args):
 
   with open(args.android_manifest) as f:
     build_info.android_manifest = f.read()
+
+  if args.target_sdk_version:
+    build_info.target_sdk_version = args.target_sdk_version
+
+  if args.min_sdk_version:
+    build_info.min_sdk_version = args.min_sdk_version
+
+  if args.no_hashtree:
+    build_info.no_hashtree = True
 
   return build_info
 
@@ -419,6 +452,8 @@ def CreateApex(args, work_dir):
     cmd.extend(['--image', img_file])
     if args.no_hashtree:
       cmd.append('--no_hashtree')
+    if args.signing_args:
+      cmd.extend(shlex.split(args.signing_args))
     RunCommand(cmd, args.verbose)
 
     # Get the minimum size of the partition required.
@@ -489,10 +524,13 @@ def CreateApex(args, work_dir):
     cmd.extend(['--version-name', manifest_apex.versionName])
   if args.target_sdk_version:
     cmd.extend(['--target-sdk-version', args.target_sdk_version])
+  if args.min_sdk_version:
+    cmd.extend(['--min-sdk-version', args.min_sdk_version])
+  else:
+    # Default value for minSdkVersion.
+    cmd.extend(['--min-sdk-version', '29'])
   if args.assets_dir:
     cmd.extend(['-A', args.assets_dir])
-  # Default value for minSdkVersion.
-  cmd.extend(['--min-sdk-version', '29'])
   cmd.extend(['-o', apk_file])
   cmd.extend(['-I', args.android_jar_path])
   RunCommand(cmd, args.verbose)

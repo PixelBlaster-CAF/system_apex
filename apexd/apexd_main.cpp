@@ -52,6 +52,11 @@ int HandleSubcommand(char** argv) {
     return android::apex::unmountAll();
   }
 
+  if (strcmp("--snapshotde", argv[1]) == 0) {
+    LOG(INFO) << "Snapshot DE subcommand detected";
+    return android::apex::snapshotOrRestoreDeUserData();
+  }
+
   LOG(ERROR) << "Unknown subcommand: " << argv[1];
   return 1;
 }
@@ -88,6 +93,7 @@ int main(int /*argc*/, char** argv) {
     vold_service = &*vold_service_st;
   }
 
+  android::apex::migrateSessionsDirIfNeeded();
   android::apex::onStart(vold_service);
   android::apex::binder::CreateAndRegisterService();
   android::apex::binder::StartThreadPool();

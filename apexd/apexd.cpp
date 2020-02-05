@@ -27,6 +27,7 @@
 #include "apexd_loop.h"
 #include "apexd_prepostinstall.h"
 #include "apexd_prop.h"
+#include "apexd_rollback_utils.h"
 #include "apexd_session.h"
 #include "apexd_utils.h"
 #include "apexd_verity.h"
@@ -827,12 +828,6 @@ Result<void> RestoreActivePackages() {
   return {};
 }
 
-Result<void> RevertStagedSession(ApexSession& session) {
-  // If the session is staged, it hasn't been activated yet, and we just need
-  // to update its state to prevent it from being activated later.
-  return session.UpdateStateAndCommit(SessionState::REVERTED);
-}
-
 Result<void> UnmountPackage(const ApexFile& apex, bool allow_latest) {
   LOG(VERBOSE) << "Unmounting " << GetPackageId(apex.GetManifest());
 
@@ -1112,7 +1107,10 @@ Result<void> abortStagedSession(int session_id) {
 
 Result<void> scanPackagesDirAndActivate(const char* apex_package_dir) {
   LOG(INFO) << "Scanning " << apex_package_dir << " looking for APEX packages.";
-
+  if (access(apex_package_dir, F_OK) != 0 && errno == ENOENT) {
+    LOG(INFO) << "... does not exist. Skipping";
+    return {};
+  }
   Result<std::vector<std::string>> scan = FindApexFilesByName(apex_package_dir);
   if (!scan) {
     return Error() << "Failed to scan " << apex_package_dir << " : "
@@ -1198,42 +1196,140 @@ Result<void> restoreDataDirectory(const std::string& base_dir,
                    rollback_id, apex_name.c_str());
   auto to_path = StringPrintf("%s/%s/%s", base_dir.c_str(), kApexDataSubDir,
                               apex_name.c_str());
-  return ReplaceFiles(from_path, to_path);
+  const Result<void> result = ReplaceFiles(from_path, to_path);
+  if (!result) {
+    return result;
+  }
+  return RestoreconPath(to_path);
 }
 
-void snapshotOrRestoreIfNeeded(const ApexSession& session,
-                               const std::vector<std::string>& apexes) {
+void snapshotOrRestoreIfNeeded(const std::string& base_dir,
+                               const ApexSession& session) {
   if (session.HasRollbackEnabled()) {
-    for (const auto& apex : apexes) {
-      Result<ApexFile> apex_file = ApexFile::Open(apex);
-      if (!apex_file) {
-        LOG(ERROR) << "Cannot open apex for snapshot: " << apex;
-        continue;
-      }
-      auto apex_name = apex_file->GetManifest().name();
-      Result<void> result = snapshotDataDirectory(
-          kDeSysDataDir, session.GetRollbackId(), apex_name);
+    for (const auto& apex_name : session.GetApexNames()) {
+      Result<void> result =
+          snapshotDataDirectory(base_dir, session.GetRollbackId(), apex_name);
       if (!result) {
-        LOG(ERROR) << "Snapshot failed for " << apex << ": " << result.error();
+        LOG(ERROR) << "Snapshot failed for " << apex_name << ": "
+                   << result.error();
       }
     }
   } else if (session.IsRollback()) {
-    for (const auto& apex : apexes) {
-      Result<ApexFile> apex_file = ApexFile::Open(apex);
-      if (!apex_file) {
-        LOG(ERROR) << "Cannot open apex for restore of data: " << apex;
-        continue;
-      }
-      auto apex_name = apex_file->GetManifest().name();
+    for (const auto& apex_name : session.GetApexNames()) {
       // TODO: Back up existing files in case rollback is reverted.
-      Result<void> result = restoreDataDirectory(
-          kDeSysDataDir, session.GetRollbackId(), apex_name);
+      Result<void> result =
+          restoreDataDirectory(base_dir, session.GetRollbackId(), apex_name);
       if (!result) {
-        LOG(ERROR) << "Restore of data failed for " << apex << ": "
+        LOG(ERROR) << "Restore of data failed for " << apex_name << ": "
                    << result.error();
       }
     }
   }
+}
+
+void snapshotOrRestoreDeSysData() {
+  auto sessions = ApexSession::GetSessionsInState(SessionState::ACTIVATED);
+
+  for (const ApexSession& session : sessions) {
+    snapshotOrRestoreIfNeeded(kDeSysDataDir, session);
+  }
+}
+
+int snapshotOrRestoreDeUserData() {
+  auto user_dirs = GetDeUserDirs();
+
+  if (!user_dirs) {
+    LOG(ERROR) << "Error reading dirs " << user_dirs.error();
+    return 1;
+  }
+
+  auto sessions = ApexSession::GetSessionsInState(SessionState::ACTIVATED);
+
+  for (const ApexSession& session : sessions) {
+    for (const auto& user_dir : *user_dirs) {
+      snapshotOrRestoreIfNeeded(user_dir, session);
+    }
+  }
+
+  return 0;
+}
+
+Result<ino_t> snapshotCeData(const int user_id, const int rollback_id,
+                             const std::string& apex_name) {
+  auto base_dir = StringPrintf("%s/%d", kCeDataDir, user_id);
+  Result<void> result = snapshotDataDirectory(base_dir, rollback_id, apex_name);
+  if (!result) {
+    return result.error();
+  }
+  auto ce_snapshot_path =
+      StringPrintf("%s/%s/%d/%s", base_dir.c_str(), kApexSnapshotSubDir,
+                   rollback_id, apex_name.c_str());
+  return get_path_inode(ce_snapshot_path);
+}
+
+Result<void> restoreCeData(const int user_id, const int rollback_id,
+                           const std::string& apex_name) {
+  auto base_dir = StringPrintf("%s/%d", kCeDataDir, user_id);
+  return restoreDataDirectory(base_dir, rollback_id, apex_name);
+}
+
+//  Migrates sessions directory from /data/apex/sessions to
+//  /metadata/apex/sessions, if necessary.
+Result<void> migrateSessionsDirIfNeeded() {
+  namespace fs = std::filesystem;
+  auto from_path = std::string(kApexDataDir) + "/sessions";
+  auto exists = PathExists(from_path);
+  if (!exists) {
+    return Error() << "Failed to access " << from_path << ": "
+                   << exists.error();
+  }
+  if (!*exists) {
+    LOG(DEBUG) << from_path << " does not exist. Nothing to migrate.";
+    return {};
+  }
+  auto to_path = kApexSessionsDir;
+  std::error_code error_code;
+  fs::copy(from_path, to_path, fs::copy_options::recursive, error_code);
+  if (error_code) {
+    return Error() << "Failed to copy old sessions directory"
+                   << error_code.message();
+  }
+  fs::remove_all(from_path, error_code);
+  if (error_code) {
+    return Error() << "Failed to delete old sessions directory "
+                   << error_code.message();
+  }
+  return {};
+}
+
+Result<void> destroySnapshots(const std::string& base_dir,
+                              const int rollback_id) {
+  namespace fs = std::filesystem;
+  auto path = StringPrintf("%s/%s/%d", base_dir.c_str(), kApexSnapshotSubDir,
+                           rollback_id);
+
+  std::error_code error_code;
+  fs::remove_all(path, error_code);
+  if (error_code) {
+    return Error() << "Failed to delete snapshots at " << path << " : "
+                   << error_code.message();
+  }
+  return {};
+}
+
+Result<void> destroyDeSnapshots(const int rollback_id) {
+  destroySnapshots(kDeSysDataDir, rollback_id);
+
+  auto user_dirs = GetDeUserDirs();
+  if (!user_dirs) {
+    return Error() << "Error reading user dirs " << user_dirs.error();
+  }
+
+  for (const auto& user_dir : *user_dirs) {
+    destroySnapshots(user_dir, rollback_id);
+  }
+
+  return {};
 }
 
 void scanStagedSessionsDirAndStage() {
@@ -1310,7 +1406,15 @@ void scanStagedSessionsDirAndStage() {
       continue;
     }
 
-    snapshotOrRestoreIfNeeded(session, apexes);
+    for (const auto& apex : apexes) {
+      // TODO: Avoid opening ApexFile repeatedly.
+      Result<ApexFile> apex_file = ApexFile::Open(apex);
+      if (!apex_file) {
+        LOG(ERROR) << "Cannot open apex file during staging: " << apex;
+        continue;
+      }
+      session.AddApexName(apex_file->GetManifest().name());
+    }
 
     const Result<void> result = stagePackages(apexes);
     if (!result) {
@@ -1466,23 +1570,6 @@ Result<void> unstagePackages(const std::vector<std::string>& paths) {
   return {};
 }
 
-void revertAllStagedSessions() {
-  auto sessions = ApexSession::GetSessionsInState(SessionState::STAGED);
-  if (sessions.empty()) {
-    LOG(WARNING) << "No session to revert";
-    return;
-  }
-
-  for (auto& session : sessions) {
-    LOG(INFO) << "Reverting back session " << session;
-    auto st = RevertStagedSession(session);
-    if (!st) {
-      LOG(ERROR) << "Failed to revert staged session " << session << ": "
-                 << st.error();
-    }
-  }
-}
-
 /**
  * During apex installation, staged sessions located in /data/apex/sessions
  * mutate the active sessions in /data/apex/active. If some error occurs during
@@ -1501,14 +1588,6 @@ Result<void> revertActiveSessions(const std::string& crashing_native_process) {
     return Error() << "Revert requested, when there are no active sessions.";
   }
 
-  if (gInFsCheckpointMode) {
-    LOG(DEBUG) << "Checkpoint mode is enabled";
-    // On checkpointing devices, our modifications on /data will be
-    // automatically reverted when we abort changes. Updating the session
-    // state is pointless here, as it will be reverted as well.
-    return {};
-  }
-
   for (auto& session : activeSessions) {
     if (!crashing_native_process.empty()) {
       session.SetCrashingNativeProcess(crashing_native_process);
@@ -1522,17 +1601,21 @@ Result<void> revertActiveSessions(const std::string& crashing_native_process) {
     }
   }
 
-  auto restoreStatus = RestoreActivePackages();
-  if (!restoreStatus) {
-    for (auto& session : activeSessions) {
-      auto st = session.UpdateStateAndCommit(SessionState::REVERT_FAILED);
-      LOG(DEBUG) << "Marking " << session << " as failed to revert";
-      if (!st) {
-        LOG(WARNING) << "Failed to mark session " << session
-                     << " as failed to revert : " << st.error();
+  if (!gInFsCheckpointMode) {
+    auto restoreStatus = RestoreActivePackages();
+    if (!restoreStatus) {
+      for (auto& session : activeSessions) {
+        auto st = session.UpdateStateAndCommit(SessionState::REVERT_FAILED);
+        LOG(DEBUG) << "Marking " << session << " as failed to revert";
+        if (!st) {
+          LOG(WARNING) << "Failed to mark session " << session
+                       << " as failed to revert : " << st.error();
+        }
       }
+      return restoreStatus;
     }
-    return restoreStatus;
+  } else {
+    LOG(INFO) << "Not restoring active packages in checkpoint mode.";
   }
 
   for (auto& session : activeSessions) {
@@ -1682,7 +1765,7 @@ void onStart(CheckpointInterface* checkpoint_service) {
     }
   }
 
-  // Ask whether we should revert any staged sessions; this can happen if
+  // Ask whether we should revert any active sessions; this can happen if
   // we've exceeded the retry count on a device that supports filesystem
   // checkpointing.
   if (gSupportsFsCheckpoints) {
@@ -1694,7 +1777,7 @@ void onStart(CheckpointInterface* checkpoint_service) {
       LOG(INFO) << "Exceeded number of session retries ("
                 << kNumRetriesWhenCheckpointingEnabled
                 << "). Starting a revert";
-      revertAllStagedSessions();
+      revertActiveSessions("");
     }
   }
 
@@ -1735,6 +1818,9 @@ void onStart(CheckpointInterface* checkpoint_service) {
                  << status.error();
     }
   }
+
+  // Now that APEXes are mounted, snapshot or restore DE_sys data.
+  snapshotOrRestoreDeSysData();
 
   if (android::base::GetBoolProperty("ro.debuggable", false)) {
     status = monitorBuiltinDirs();

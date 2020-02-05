@@ -290,6 +290,15 @@ class ApexServiceTest : public ::testing::Test {
     return data;
   }
 
+  static void DeleteIfExists(const std::string& path) {
+    if (fs::exists(path)) {
+      std::error_code ec;
+      fs::remove_all(path, ec);
+      ASSERT_FALSE(ec) << "Failed to delete dir " << path << " : "
+                       << ec.message();
+    }
+  }
+
   struct PrepareTestApexForInstall {
     static constexpr const char* kTestDir = "/data/app-staging/apexservice_tmp";
 
@@ -433,7 +442,13 @@ class ApexServiceTest : public ::testing::Test {
       ASSERT_FALSE(ec) << "Failed to delete " << p.path() << " : "
                        << ec.message();
     });
+    fs::remove_all(kApexSessionsDir);
     ASSERT_TRUE(IsOk(status));
+
+    DeleteIfExists("/data/misc_ce/0/apexdata/apex.apexd_test");
+    DeleteIfExists("/data/misc_ce/0/apexrollback/123456");
+    DeleteIfExists("/data/misc_de/0/apexrollback/123456");
+    DeleteIfExists("/data/misc/apexrollback/123456");
   }
 };
 
@@ -445,6 +460,27 @@ bool RegularFileExists(const std::string& path) {
     return false;
   }
   return S_ISREG(buf.st_mode);
+}
+
+bool DirExists(const std::string& path) {
+  struct stat buf;
+  if (0 != stat(path.c_str(), &buf)) {
+    return false;
+  }
+  return S_ISDIR(buf.st_mode);
+}
+
+void CreateDir(const std::string& path) {
+  std::error_code ec;
+  fs::create_directory(path, ec);
+  ASSERT_FALSE(ec) << "Failed to create rollback dir "
+                   << " : " << ec.message();
+}
+
+void CreateFile(const std::string& path) {
+  std::ofstream ofs(path);
+  ASSERT_TRUE(ofs.good());
+  ofs.close();
 }
 
 Result<std::vector<std::string>> ReadEntireDir(const std::string& path) {
@@ -784,6 +820,84 @@ TEST_F(ApexServiceTest, SessionParamDefaults) {
   ASSERT_FALSE(session->IsRollback());
   ASSERT_FALSE(session->HasRollbackEnabled());
   ASSERT_EQ(0, session->GetRollbackId());
+}
+
+TEST_F(ApexServiceTest, SnapshotCeData) {
+  CreateDir("/data/misc_ce/0/apexdata/apex.apexd_test");
+  CreateFile("/data/misc_ce/0/apexdata/apex.apexd_test/hello.txt");
+
+  ASSERT_TRUE(
+      RegularFileExists("/data/misc_ce/0/apexdata/apex.apexd_test/hello.txt"));
+
+  int64_t result;
+  service_->snapshotCeData(0, 123456, "apex.apexd_test", &result);
+
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_ce/0/apexrollback/123456/apex.apexd_test/hello.txt"));
+
+  // Check that the return value is the inode of the snapshot directory.
+  struct stat buf;
+  memset(&buf, 0, sizeof(buf));
+  ASSERT_EQ(0,
+            stat("/data/misc_ce/0/apexrollback/123456/apex.apexd_test", &buf));
+  ASSERT_EQ(int64_t(buf.st_ino), result);
+}
+
+TEST_F(ApexServiceTest, RestoreCeData) {
+  CreateDir("/data/misc_ce/0/apexdata/apex.apexd_test");
+  CreateDir("/data/misc_ce/0/apexrollback/123456");
+  CreateDir("/data/misc_ce/0/apexrollback/123456/apex.apexd_test");
+
+  CreateFile("/data/misc_ce/0/apexdata/apex.apexd_test/newfile.txt");
+  CreateFile("/data/misc_ce/0/apexrollback/123456/apex.apexd_test/oldfile.txt");
+
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_ce/0/apexdata/apex.apexd_test/newfile.txt"));
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_ce/0/apexrollback/123456/apex.apexd_test/oldfile.txt"));
+
+  service_->restoreCeData(0, 123456, "apex.apexd_test");
+
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_ce/0/apexdata/apex.apexd_test/oldfile.txt"));
+  ASSERT_FALSE(RegularFileExists(
+      "/data/misc_ce/0/apexdata/apex.apexd_test/newfile.txt"));
+}
+
+TEST_F(ApexServiceTest, DestroyDeSnapshots_DeSys) {
+  CreateDir("/data/misc/apexrollback/123456");
+  CreateDir("/data/misc/apexrollback/123456/my.apex");
+  CreateFile("/data/misc/apexrollback/123456/my.apex/hello.txt");
+
+  ASSERT_TRUE(
+      RegularFileExists("/data/misc/apexrollback/123456/my.apex/hello.txt"));
+
+  service_->destroyDeSnapshots(8975);
+  ASSERT_TRUE(
+      RegularFileExists("/data/misc/apexrollback/123456/my.apex/hello.txt"));
+
+  service_->destroyDeSnapshots(123456);
+  ASSERT_FALSE(
+      RegularFileExists("/data/misc/apexrollback/123456/my.apex/hello.txt"));
+  ASSERT_FALSE(DirExists("/data/misc/apexrollback/123456"));
+}
+
+TEST_F(ApexServiceTest, DestroyDeSnapshots_DeUser) {
+  CreateDir("/data/misc_de/0/apexrollback/123456");
+  CreateDir("/data/misc_de/0/apexrollback/123456/my.apex");
+  CreateFile("/data/misc_de/0/apexrollback/123456/my.apex/hello.txt");
+
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_de/0/apexrollback/123456/my.apex/hello.txt"));
+
+  service_->destroyDeSnapshots(8975);
+  ASSERT_TRUE(RegularFileExists(
+      "/data/misc_de/0/apexrollback/123456/my.apex/hello.txt"));
+
+  service_->destroyDeSnapshots(123456);
+  ASSERT_FALSE(RegularFileExists(
+      "/data/misc_de/0/apexrollback/123456/my.apex/hello.txt"));
+  ASSERT_FALSE(DirExists("/data/misc_de/0/apexrollback/123456"));
 }
 
 template <typename NameProvider>
@@ -2206,10 +2320,6 @@ TEST_F(ApexServiceRevertTest, RevertFailedStateRevertAttemptFails) {
 }
 
 TEST_F(ApexServiceRevertTest, RevertStoresCrashingNativeProcess) {
-  if (supports_fs_checkpointing_) {
-    GTEST_SKIP() << "Can't run if filesystem checkpointing is enabled";
-  }
-
   PrepareTestApexForInstall installer(GetTestFile("apex.apexd_test_v2.apex"));
   if (!installer.Prepare()) {
     return;
