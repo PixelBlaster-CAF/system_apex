@@ -72,7 +72,6 @@ using android::apex::testing::ApexInfoEq;
 using android::apex::testing::CreateSessionInfo;
 using android::apex::testing::IsOk;
 using android::apex::testing::SessionInfoEq;
-using android::base::Errorf;
 using android::base::Join;
 using android::base::ReadFully;
 using android::base::StartsWith;
@@ -327,7 +326,7 @@ class ApexServiceTest : public ::testing::Test {
       package = "";  // Explicitly mark as not initialized.
 
       Result<ApexFile> apex_file = ApexFile::Open(test);
-      if (!apex_file) {
+      if (!apex_file.ok()) {
         return;
       }
 
@@ -345,7 +344,7 @@ class ApexServiceTest : public ::testing::Test {
         auto fail_fn = [&]() {
           Result<ApexFile> apex_file = ApexFile::Open(test_input);
           ASSERT_FALSE(IsOk(apex_file));
-          ASSERT_TRUE(apex_file)
+          ASSERT_TRUE(apex_file.ok())
               << test_input << " failed to load: " << apex_file.error();
         };
         fail_fn();
@@ -1485,7 +1484,7 @@ TEST_F(ApexServiceActivationSuccessTest, DmDeviceTearDown) {
 #define ASSERT_FIND(type)                   \
   {                                         \
     Result<bool> res = find_fn(package_id); \
-    ASSERT_TRUE(res);                       \
+    ASSERT_RESULT_OK(res);                  \
     ASSERT_##type(*res);                    \
   }
 

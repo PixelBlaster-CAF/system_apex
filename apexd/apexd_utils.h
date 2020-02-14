@@ -39,7 +39,6 @@
 #include "string_log.h"
 
 using android::base::ErrnoError;
-using android::base::ErrnoErrorf;
 using android::base::Error;
 using android::base::Result;
 
@@ -119,7 +118,7 @@ Result<std::vector<std::string>> ReadDir(const std::string& path, FilterFn fn) {
       ret.push_back(entry.path());
     }
   });
-  if (!status) {
+  if (!status.ok()) {
     return status.error();
   }
   return ret;
@@ -127,7 +126,7 @@ Result<std::vector<std::string>> ReadDir(const std::string& path, FilterFn fn) {
 
 inline bool IsEmptyDirectory(const std::string& path) {
   auto res = ReadDir(path, [](auto _) { return true; });
-  return res && res->empty();
+  return res.ok() && res->empty();
 }
 
 inline Result<void> createDirIfNeeded(const std::string& path, mode_t mode) {
@@ -158,13 +157,23 @@ inline Result<void> createDirIfNeeded(const std::string& path, mode_t mode) {
 
 inline Result<void> DeleteDirContent(const std::string& path) {
   auto files = ReadDir(path, [](auto _) { return true; });
-  if (!files) {
+  if (!files.ok()) {
     return Error() << "Failed to delete " << path << " : " << files.error();
   }
   for (const std::string& file : *files) {
     if (unlink(file.c_str()) != 0) {
       return ErrnoError() << "Failed to delete " << file;
     }
+  }
+  return {};
+}
+
+inline Result<void> DeleteDir(const std::string& path) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::remove_all(path, ec);
+  if (ec) {
+    return Error() << "Failed to delete path " << path << " : " << ec.message();
   }
   return {};
 }
