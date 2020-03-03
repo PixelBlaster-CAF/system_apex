@@ -33,6 +33,13 @@ import uuid
 import xml.etree.ElementTree as ET
 from apex_manifest import ValidateApexManifest
 from apex_manifest import ApexManifestError
+from manifest import android_ns
+from manifest import find_child_with_attribute
+from manifest import get_children_with_tag
+from manifest import get_indent
+from manifest import parse_manifest
+from manifest import write_xml
+from xml.dom import minidom
 
 tool_path_list = None
 BLOCK_SIZE = 4096
@@ -56,6 +63,10 @@ def ParseArgs(argv):
       '--android_manifest',
       help='path to the AndroidManifest file. If omitted, a default one is created and used'
   )
+  parser.add_argument(
+      '--logging_parent',
+      help=('specify logging parent as an additional <meta-data> tag.'
+            'This value is ignored if the logging_parent meta-data tag is present.'))
   parser.add_argument(
       '--assets_dir',
       help='an assets directory to be included in the APEX'
@@ -143,6 +154,17 @@ def ParseArgs(argv):
       '--build_info',
       required=False,
       help='Build information file to be used for default values.')
+  parser.add_argument(
+      '--payload_only',
+      action='store_true',
+      help='Outputs the payload image/zip only.'
+  )
+  parser.add_argument(
+      '--unsigned_payload_only',
+      action='store_true',
+      help="""Outputs the unsigned payload image/zip only. Also, setting this flag implies 
+                                    --payload_only is set too."""
+  )
   return parser.parse_args(argv)
 
 
@@ -267,8 +289,11 @@ def ValidateArgs(args):
     print(args.output + ' already exists. Use --force to overwrite.')
     return False
 
+  if args.unsigned_payload_only:
+    args.payload_only = True;
+
   if args.payload_type == 'image':
-    if not args.key:
+    if not args.key and not args.unsigned_payload_only:
       print('Missing --key {keyfile} argument!')
       return False
 
@@ -333,6 +358,54 @@ def GenerateBuildInfo(args):
 
   return build_info
 
+def AddLoggingParent(android_manifest, logging_parent_value):
+  """Add logging parent as an additional <meta-data> tag.
+
+  Args:
+    android_manifest: A string representing AndroidManifest.xml
+    logging_parent_value: A string representing the logging
+      parent value.
+  Raises:
+    RuntimeError: Invalid manifest
+  Returns:
+    A path to modified AndroidManifest.xml
+  """
+  doc = minidom.parse(android_manifest)
+  manifest = parse_manifest(doc)
+  logging_parent_key = 'android.content.pm.LOGGING_PARENT'
+  elems = get_children_with_tag(manifest, 'application')
+  application = elems[0] if len(elems) == 1 else None
+  if len(elems) > 1:
+    raise RuntimeError('found multiple <application> tags')
+  elif not elems:
+    application = doc.createElement('application')
+    indent = get_indent(manifest.firstChild, 1)
+    first = manifest.firstChild
+    manifest.insertBefore(doc.createTextNode(indent), first)
+    manifest.insertBefore(application, first)
+
+  indent = get_indent(application.firstChild, 2)
+  last = application.lastChild
+  if last is not None and last.nodeType != minidom.Node.TEXT_NODE:
+    last = None
+
+  if not find_child_with_attribute(application, 'meta-data', android_ns,
+                                   'name', logging_parent_key):
+    ul = doc.createElement('meta-data')
+    ul.setAttributeNS(android_ns, 'android:name', logging_parent_key)
+    ul.setAttributeNS(android_ns, 'android:value', logging_parent_value)
+    application.insertBefore(doc.createTextNode(indent), last)
+    application.insertBefore(ul, last)
+    last = application.lastChild
+
+  if last and last.nodeType != minidom.Node.TEXT_NODE:
+    indent = get_indent(application.previousSibling, 1)
+    application.appendChild(doc.createTextNode(indent))
+
+  with tempfile.NamedTemporaryFile(delete=False) as temp:
+      write_xml(temp, doc)
+      return temp.name
+
 def CreateApex(args, work_dir):
   if not ValidateArgs(args):
     return False
@@ -373,9 +446,10 @@ def CreateApex(args, work_dir):
     copyfile(args.manifest_json, os.path.join(manifests_dir, 'apex_manifest.json'))
 
   if args.payload_type == 'image':
-    key_name = os.path.basename(os.path.splitext(args.key)[0])
-    if args.do_not_check_keyname:
+    if args.do_not_check_keyname or args.unsigned_payload_only:
       key_name = manifest_apex.name
+    else:
+      key_name = os.path.basename(os.path.splitext(args.key)[0])
 
     if manifest_apex.name != key_name:
       print("package name '" + manifest_apex.name +
@@ -439,6 +513,12 @@ def CreateApex(args, work_dir):
     cmd.append(img_file)
     RunCommand(cmd, args.verbose, {'E2FSPROGS_FAKE_TIME': '1'})
 
+    if args.unsigned_payload_only:
+      shutil.copyfile(img_file, args.output)
+      if (args.verbose):
+        print('Created (unsigned payload only) ' + args.output)
+      return True
+
     cmd = ['avbtool']
     cmd.append('add_hashtree_footer')
     cmd.append('--do_not_generate_fec')
@@ -482,6 +562,12 @@ def CreateApex(args, work_dir):
     cmd.extend(['-D', manifests_dir])
     RunCommand(cmd, args.verbose)
 
+  if args.payload_only:
+    shutil.copyfile(img_file, args.output)
+    if (args.verbose):
+      print('Created (payload only) ' + args.output)
+    return True
+
   # package the image file and APEX manifest as an APK.
   # The AndroidManifest file is automatically generated if not given.
   android_manifest_file = os.path.join(work_dir, 'AndroidManifest.xml')
@@ -495,6 +581,11 @@ def CreateApex(args, work_dir):
   else:
     ValidateAndroidManifest(manifest_apex.name, args.android_manifest)
     shutil.copyfile(args.android_manifest, android_manifest_file)
+
+  # If logging parent is specified, add it to the AndroidManifest.
+  if args.logging_parent != "":
+    android_manifest_file = AddLoggingParent(android_manifest_file,
+                                             args.logging_parent)
 
   # copy manifest to the content dir so that it is also accessible
   # without mounting the image
