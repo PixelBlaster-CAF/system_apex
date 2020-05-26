@@ -114,4 +114,86 @@ public class ApexdHostTest extends BaseHostJUnit4Test  {
             getDevice().reboot();
         }
     }
+
+    @Test
+    public void testApexWithoutPbIsNotActivated_ProductPartitionHasOlderVersion()
+            throws Exception {
+        assumeTrue("Device does not support updating APEX", mTestUtils.isApexUpdateSupported());
+        assumeTrue("Device requires root", getDevice().isAdbRoot());
+
+        try {
+            getDevice().remountSystemWritable();
+            // In case remount requires a reboot, wait for boot to complete.
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            final File v1 = mTestUtils.getTestFile("apex.apexd_test.apex");
+            getDevice().pushFile(v1, "/product/apex/apex.apexd_test.apex");
+
+            final File v2_no_pb = mTestUtils.getTestFile("apex.apexd_test_v2_no_pb.apex");
+            getDevice().pushFile(v2_no_pb, "/data/apex/active/apex.apexd_test_v2_no_pb.apex");
+
+            getDevice().reboot();
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            final Set<ITestDevice.ApexInfo> activeApexes = getDevice().getActiveApexes();
+            assertThat(activeApexes).contains(new ITestDevice.ApexInfo(
+                    "com.android.apex.test_package", 1L));
+            assertThat(activeApexes).doesNotContain(new ITestDevice.ApexInfo(
+                    "com.android.apex.test_package", 2L));
+
+            // v2_no_pb should be deleted
+            mTestUtils.waitForFileDeleted("/data/apex/active/apex.apexd_test_v2_no_pb.apex",
+                    Duration.ofMinutes(3));
+        } finally {
+            getDevice().remountSystemWritable();
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            getDevice().executeShellV2Command("rm /product/apex/apex.apexd_test.apex");
+            getDevice().executeShellV2Command("rm /data/apex/active/apex.apexd_test_v2_no_pb.apex");
+        }
+    }
+
+    @Test
+    public void testApexWithoutPbIsNotActivated_ProductPartitionHasNewerVersion()
+            throws Exception {
+        assumeTrue("Device does not support updating APEX", mTestUtils.isApexUpdateSupported());
+        assumeTrue("Device requires root", getDevice().isAdbRoot());
+
+        try {
+            getDevice().remountSystemWritable();
+            // In case remount requires a reboot, wait for boot to complete.
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            final File v3 = mTestUtils.getTestFile("apex.apexd_test_v3.apex");
+            getDevice().pushFile(v3, "/product/apex/apex.apexd_test_v3.apex");
+
+            final File v2_no_pb = mTestUtils.getTestFile("apex.apexd_test_v2_no_pb.apex");
+            getDevice().pushFile(v2_no_pb, "/data/apex/active/apex.apexd_test_v2_no_pb.apex");
+
+            getDevice().reboot();
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            final Set<ITestDevice.ApexInfo> activeApexes = getDevice().getActiveApexes();
+            assertThat(activeApexes).contains(new ITestDevice.ApexInfo(
+                    "com.android.apex.test_package", 3L));
+            assertThat(activeApexes).doesNotContain(new ITestDevice.ApexInfo(
+                    "com.android.apex.test_package", 2L));
+
+            // v2_no_pb should be deleted
+            mTestUtils.waitForFileDeleted("/data/apex/active/apex.apexd_test_v2_no_pb.apex",
+                    Duration.ofMinutes(3));
+        } finally {
+            getDevice().remountSystemWritable();
+            assertWithMessage("Timed out waiting for device to boot").that(
+                    getDevice().waitForBootComplete(Duration.ofMinutes(2).toMillis())).isTrue();
+
+            getDevice().executeShellV2Command("rm /product/apex/apex.apexd_test_v3.apex");
+            getDevice().executeShellV2Command("rm /data/apex/active/apex.apexd_test_v2_no_pb.apex");
+        }
+    }
 }
