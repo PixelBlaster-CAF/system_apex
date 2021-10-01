@@ -79,8 +79,8 @@ class ApexService : public BnApexService {
   BinderStatus getSessions(std::vector<ApexSessionInfo>* aidl_return) override;
   BinderStatus getStagedSessionInfo(
       int session_id, ApexSessionInfo* apex_session_info) override;
-  BinderStatus activatePackage(const std::string& package_path) override;
-  BinderStatus deactivatePackage(const std::string& package_path) override;
+  BinderStatus getStagedApexInfos(const ApexSessionParams& params,
+                                  std::vector<ApexInfo>* aidl_return) override;
   BinderStatus getActivePackages(std::vector<ApexInfo>* aidl_return) override;
   BinderStatus getActivePackage(const std::string& package_name,
                                 ApexInfo* aidl_return) override;
@@ -231,15 +231,15 @@ BinderStatus ApexService::markBootCompleted() {
 BinderStatus ApexService::calculateSizeForCompressedApex(
     const CompressedApexInfoList& compressed_apex_info_list,
     int64_t* required_size) {
-  *required_size = 0;
-  const auto& instance = ApexFileRepository::GetInstance();
+  std::vector<std::tuple<std::string, int64_t, int64_t>> compressed_apexes;
+  compressed_apexes.reserve(compressed_apex_info_list.apexInfos.size());
   for (const auto& apex_info : compressed_apex_info_list.apexInfos) {
-    auto should_allocate_space = ShouldAllocateSpaceForDecompression(
-        apex_info.moduleName, apex_info.versionCode, instance);
-    if (!should_allocate_space.ok() || *should_allocate_space) {
-      *required_size += apex_info.decompressedSize;
-    }
+    compressed_apexes.emplace_back(apex_info.moduleName, apex_info.versionCode,
+                                   apex_info.decompressedSize);
   }
+  const auto& instance = ApexFileRepository::GetInstance();
+  *required_size = ::android::apex::CalculateSizeForCompressedApex(
+      compressed_apexes, instance);
   return BinderStatus::ok();
 }
 
@@ -372,46 +372,27 @@ BinderStatus ApexService::getStagedSessionInfo(
   return BinderStatus::ok();
 }
 
-BinderStatus ApexService::activatePackage(const std::string& package_path) {
-  BinderStatus debug_check = CheckDebuggable("activatePackage");
-  if (!debug_check.isOk()) {
-    return debug_check;
+BinderStatus ApexService::getStagedApexInfos(
+    const ApexSessionParams& params, std::vector<ApexInfo>* aidl_return) {
+  LOG(DEBUG) << "getStagedApexInfos() received by ApexService, session id "
+             << params.sessionId << " child sessions: ["
+             << android::base::Join(params.childSessionIds, ',') << "]";
+  Result<std::vector<ApexFile>> files = ::android::apex::GetStagedApexFiles(
+      params.sessionId, params.childSessionIds);
+  if (!files.ok()) {
+    LOG(ERROR) << "Failed to getStagedApexInfo session id " << params.sessionId
+               << ": " << files.error();
+    return BinderStatus::fromExceptionCode(
+        BinderStatus::EX_SERVICE_SPECIFIC,
+        String8(files.error().message().c_str()));
   }
 
-  LOG(DEBUG) << "activatePackage() received by ApexService, path "
-             << package_path;
-
-  Result<void> res = ::android::apex::ActivatePackage(package_path);
-
-  if (res.ok()) {
-    return BinderStatus::ok();
+  for (const auto& apex_file : *files) {
+    ApexInfo apex_info = GetApexInfo(apex_file);
+    aidl_return->push_back(std::move(apex_info));
   }
 
-  LOG(ERROR) << "Failed to activate " << package_path << ": " << res.error();
-  return BinderStatus::fromExceptionCode(
-      BinderStatus::EX_SERVICE_SPECIFIC,
-      String8(res.error().message().c_str()));
-}
-
-BinderStatus ApexService::deactivatePackage(const std::string& package_path) {
-  BinderStatus debug_check = CheckDebuggable("deactivatePackage");
-  if (!debug_check.isOk()) {
-    return debug_check;
-  }
-
-  LOG(DEBUG) << "deactivatePackage() received by ApexService, path "
-             << package_path;
-
-  Result<void> res = ::android::apex::DeactivatePackage(package_path);
-
-  if (res.ok()) {
-    return BinderStatus::ok();
-  }
-
-  LOG(ERROR) << "Failed to deactivate " << package_path << ": " << res.error();
-  return BinderStatus::fromExceptionCode(
-      BinderStatus::EX_SERVICE_SPECIFIC,
-      String8(res.error().message().c_str()));
+  return BinderStatus::ok();
 }
 
 BinderStatus ApexService::getActivePackages(
@@ -890,12 +871,13 @@ status_t ApexService::shellCommand(int in, int out, int err,
       print_help(err, "activatePackage requires one package_path");
       return BAD_VALUE;
     }
-    BinderStatus status = activatePackage(String8(args[1]).string());
-    if (status.isOk()) {
+    std::string path = String8(args[1]).string();
+    auto status = ::android::apex::ActivatePackage(path);
+    if (status.ok()) {
       return OK;
     }
     std::string msg = StringLog() << "Failed to activate package: "
-                                  << status.toString8().string() << std::endl;
+                                  << status.error().message() << std::endl;
     dprintf(err, "%s", msg.c_str());
     return BAD_VALUE;
   }
@@ -905,12 +887,13 @@ status_t ApexService::shellCommand(int in, int out, int err,
       print_help(err, "deactivatePackage requires one package_path");
       return BAD_VALUE;
     }
-    BinderStatus status = deactivatePackage(String8(args[1]).string());
-    if (status.isOk()) {
+    std::string path = String8(args[1]).string();
+    auto status = ::android::apex::DeactivatePackage(path);
+    if (status.ok()) {
       return OK;
     }
     std::string msg = StringLog() << "Failed to deactivate package: "
-                                  << status.toString8().string() << std::endl;
+                                  << status.error().message() << std::endl;
     dprintf(err, "%s", msg.c_str());
     return BAD_VALUE;
   }

@@ -62,7 +62,7 @@ struct FsMagic {
 constexpr const FsMagic kFsType[] = {{"f2fs", 1024, 4, "\x10\x20\xf5\xf2"},
                                      {"ext4", 1024 + 0x38, 2, "\123\357"}};
 
-Result<std::string> RetrieveFsType(borrowed_fd fd, int32_t image_offset) {
+Result<std::string> RetrieveFsType(borrowed_fd fd, uint32_t image_offset) {
   for (const auto& fs : kFsType) {
     char buf[fs.len];
     if (!ReadFullyAtOffset(fd, buf, fs.len, image_offset + fs.offset)) {
@@ -78,7 +78,7 @@ Result<std::string> RetrieveFsType(borrowed_fd fd, int32_t image_offset) {
 }  // namespace
 
 Result<ApexFile> ApexFile::Open(const std::string& path) {
-  std::optional<int32_t> image_offset;
+  std::optional<uint32_t> image_offset;
   std::optional<size_t> image_size;
   std::string manifest_content;
   std::string pubkey;
@@ -87,14 +87,15 @@ Result<ApexFile> ApexFile::Open(const std::string& path) {
 
   unique_fd fd(open(path.c_str(), O_RDONLY | O_BINARY | O_CLOEXEC));
   if (fd < 0) {
-    return Error() << "Failed to open package " << path << ": "
-                   << "I/O error";
+    return ErrnoError() << "Failed to open package " << path << ": "
+                        << "I/O error";
   }
 
   ZipArchiveHandle handle;
   auto handle_guard =
       android::base::make_scope_guard([&handle] { CloseArchive(handle); });
-  int ret = OpenArchiveFd(fd.get(), path.c_str(), &handle, false);
+  int ret = OpenArchiveFd(fd.get(), path.c_str(), &handle,
+                          /*assume_ownership=*/false);
   if (ret < 0) {
     return Error() << "Failed to open package " << path << ": "
                    << ErrorCodeString(ret);

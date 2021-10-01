@@ -25,6 +25,7 @@
 #include <android-base/result.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <microdroid/metadata.h>
 
 #include "apex_constants.h"
 #include "apex_file.h"
@@ -98,6 +99,74 @@ android::base::Result<void> ApexFileRepository::AddPreInstalledApex(
     if (auto result = ScanBuiltInDir(dir); !result.ok()) {
       return result.error();
     }
+  }
+  return {};
+}
+
+Result<void> ApexFileRepository::AddBlockApex(
+    const std::string& metadata_partition) {
+  // TODO(b/185069443) consider moving the logic to find disk_path from
+  // metadata_partition to its own library
+  LOG(INFO) << "Scanning " << metadata_partition << " for host apexes";
+  if (access(metadata_partition.c_str(), F_OK) != 0 && errno == ENOENT) {
+    LOG(WARNING) << metadata_partition << " does not exist. Skipping";
+    return {};
+  }
+
+  std::string metadata_realpath;
+  if (!android::base::Realpath(metadata_partition, &metadata_realpath)) {
+    LOG(WARNING) << "Can't get realpath of " << metadata_partition
+                 << ". Skipping";
+    return {};
+  }
+
+  std::string_view metadata_path_view(metadata_realpath);
+  if (!android::base::ConsumeSuffix(&metadata_path_view, "1")) {
+    LOG(WARNING) << metadata_realpath << " is not a first partition. Skipping";
+    return {};
+  }
+
+  const std::string disk_path(metadata_path_view);
+
+  // The first partition is "metadata".
+  auto metadata = android::microdroid::ReadMetadata(metadata_realpath);
+  if (!metadata.ok()) {
+    LOG(WARNING) << "Failed to load metadata from " << metadata_realpath
+                 << ". Skipping: " << metadata.error();
+    return {};
+  }
+
+  // subsequent partitions are APEX archives.
+  static constexpr const int kFirstApexPartition = 2;
+  for (int i = 0; i < metadata->apexes_size(); i++) {
+    const auto& apex_config = metadata->apexes(i);
+
+    const std::string apex_path =
+        disk_path + std::to_string(i + kFirstApexPartition);
+    auto apex_file = ApexFile::Open(apex_path);
+    if (!apex_file.ok()) {
+      return Error() << "Failed to open " << apex_path << " : "
+                     << apex_file.error();
+    }
+
+    // When metadata specifies the public key of the apex, it should match the
+    // bundled key. Otherwise we accept it.
+    if (apex_config.publickey() != "" &&
+        apex_config.publickey() != apex_file->GetBundledPublicKey()) {
+      return Error() << "public key doesn't match: " << apex_path;
+    }
+
+    // TODO(b/185873258): metadata in repository to verify apexes with
+    // root_digest when given.
+
+    // APEX should be unique.
+    const std::string& name = apex_file->GetManifest().name();
+    auto it = pre_installed_store_.find(name);
+    if (it != pre_installed_store_.end()) {
+      return Error() << "duplicate found in " << it->second.GetPath();
+    }
+
+    pre_installed_store_.emplace(name, std::move(*apex_file));
   }
   return {};
 }
