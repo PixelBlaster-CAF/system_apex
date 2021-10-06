@@ -69,7 +69,6 @@ namespace apex {
 
 using android::sp;
 using android::String16;
-using android::apex::testing::ApexInfoEq;
 using android::apex::testing::CreateSessionInfo;
 using android::apex::testing::IsOk;
 using android::apex::testing::SessionInfoEq;
@@ -77,15 +76,14 @@ using android::base::EndsWith;
 using android::base::Error;
 using android::base::Join;
 using android::base::Result;
+using android::base::SetProperty;
 using android::base::StartsWith;
 using android::base::StringPrintf;
 using android::base::unique_fd;
 using android::dm::DeviceMapper;
 using ::apex::proto::ApexManifest;
 using ::apex::proto::SessionState;
-using ::testing::Contains;
 using ::testing::EndsWith;
-using ::testing::HasSubstr;
 using ::testing::Not;
 using ::testing::SizeIs;
 using ::testing::UnorderedElementsAre;
@@ -105,6 +103,9 @@ class ApexServiceTest : public ::testing::Test {
     if (!android::base::GetBoolProperty("ro.apex.updatable", false)) {
       GTEST_SKIP() << "Skipping test because device doesn't support APEX";
     }
+
+    // Enable VERBOSE logging to simplifying debugging
+    SetProperty("log.tag.apexd", "VERBOSE");
 
     using android::IBinder;
     using android::IServiceManager;
@@ -141,37 +142,6 @@ class ApexServiceTest : public ::testing::Test {
 
   static bool IsSelinuxEnforced() { return 0 != security_getenforce(); }
 
-  Result<bool> IsActive(const std::string& name) {
-    std::vector<ApexInfo> list;
-    android::binder::Status status = service_->getActivePackages(&list);
-    if (!status.isOk()) {
-      return Error() << "Failed to check if " << name
-                     << " is active : " << status.exceptionMessage().c_str();
-    }
-    for (const ApexInfo& apex : list) {
-      if (apex.moduleName == name) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  Result<bool> IsActive(const std::string& name, int64_t version,
-                        const std::string& path) {
-    std::vector<ApexInfo> list;
-    android::binder::Status status = service_->getActivePackages(&list);
-    if (status.isOk()) {
-      for (const ApexInfo& p : list) {
-        if (p.moduleName == name && p.versionCode == version &&
-            p.modulePath == path) {
-          return true;
-        }
-      }
-      return false;
-    }
-    return Error() << status.exceptionMessage().c_str();
-  }
-
   Result<std::vector<ApexInfo>> GetAllPackages() {
     std::vector<ApexInfo> list;
     android::binder::Status status = service_->getAllPackages(&list);
@@ -204,16 +174,6 @@ class ApexServiceTest : public ::testing::Test {
     }
 
     return Error() << status.toString8().c_str();
-  }
-
-  Result<ApexInfo> GetActivePackage(const std::string& name) {
-    ApexInfo package;
-    android::binder::Status status = service_->getActivePackage(name, &package);
-    if (status.isOk()) {
-      return package;
-    }
-
-    return Error() << status.exceptionMessage().c_str();
   }
 
   std::string GetPackageString(const ApexInfo& p) {
@@ -288,26 +248,6 @@ class ApexServiceTest : public ::testing::Test {
         << "Failed to list " << path << " : " << status.error();
     std::sort(ret.begin(), ret.end());
     return ret;
-  }
-
-  static std::string GetLogcat() {
-    // For simplicity, log to file and read it.
-    std::string file = GetTestFile("logcat.tmp.txt");
-    std::vector<std::string> args{
-        "/system/bin/logcat",
-        "-d",
-        "-f",
-        file,
-    };
-    auto res = ForkAndRun(args);
-    CHECK(res.ok()) << res.error();
-
-    std::string data;
-    CHECK(android::base::ReadFileToString(file, &data));
-
-    unlink(file.c_str());
-
-    return data;
   }
 
   static void DeleteIfExists(const std::string& path) {
@@ -841,96 +781,6 @@ TEST_F(ApexServiceTest, GetAllPackages) {
         << package_string << " should " << (should_be_factory ? "" : "not ")
         << "be factory";
   }
-}
-
-class ApexServicePrePostInstallTest : public ApexServiceTest {
- public:
-  template <typename Fn>
-  void RunPrePost(Fn fn, const std::vector<std::string>& apex_names,
-                  const char* test_message, bool expect_success = true) {
-    // Using unique_ptr is just the easiest here.
-    using InstallerUPtr = std::unique_ptr<PrepareTestApexForInstall>;
-    std::vector<InstallerUPtr> installers;
-    std::vector<std::string> pkgs;
-
-    for (const std::string& apex_name : apex_names) {
-      InstallerUPtr installer(
-          new PrepareTestApexForInstall(GetTestFile(apex_name)));
-      if (!installer->Prepare()) {
-        return;
-      }
-      pkgs.push_back(installer->test_file);
-      installers.emplace_back(std::move(installer));
-    }
-    android::binder::Status st = (service_.get()->*fn)(pkgs);
-    if (expect_success) {
-      ASSERT_TRUE(IsOk(st));
-    } else {
-      ASSERT_FALSE(IsOk(st));
-    }
-
-    if (test_message != nullptr) {
-      std::string logcat = GetLogcat();
-      EXPECT_THAT(logcat, HasSubstr(test_message));
-    }
-
-    // Ensure that the package is neither active nor mounted.
-    for (const InstallerUPtr& installer : installers) {
-      Result<bool> active = IsActive(installer->package, installer->version,
-                                     installer->test_file);
-      ASSERT_TRUE(IsOk(active));
-      EXPECT_FALSE(*active);
-    }
-    for (const InstallerUPtr& installer : installers) {
-      Result<ApexFile> apex = ApexFile::Open(installer->test_input);
-      ASSERT_TRUE(IsOk(apex));
-      std::string path =
-          apexd_private::GetPackageMountPoint(apex->GetManifest());
-      std::string entry = std::string("[dir]").append(path);
-      std::vector<std::string> slash_apex = ListDir(kApexRoot);
-      auto it = std::find(slash_apex.begin(), slash_apex.end(), entry);
-      EXPECT_TRUE(it == slash_apex.end()) << Join(slash_apex, ',');
-    }
-  }
-};
-
-TEST_F(ApexServicePrePostInstallTest, Preinstall) {
-  RunPrePost(&IApexService::preinstallPackages,
-             {"apex.apexd_test_preinstall.apex"}, "sh      : PreInstall Test");
-}
-
-TEST_F(ApexServicePrePostInstallTest, MultiPreinstall) {
-  constexpr const char* kLogcatText =
-      "sh      : /apex/com.android.apex.test_package/etc/sample_prebuilt_file";
-  RunPrePost(&IApexService::preinstallPackages,
-             {"apex.apexd_test_preinstall.apex", "apex.apexd_test.apex"},
-             kLogcatText);
-}
-
-TEST_F(ApexServicePrePostInstallTest, PreinstallFail) {
-  RunPrePost(&IApexService::preinstallPackages,
-             {"apex.apexd_test_prepostinstall.fail.apex"},
-             /* test_message= */ nullptr, /* expect_success= */ false);
-}
-
-TEST_F(ApexServicePrePostInstallTest, Postinstall) {
-  RunPrePost(&IApexService::postinstallPackages,
-             {"apex.apexd_test_postinstall.apex"},
-             "sh      : PostInstall Test");
-}
-
-TEST_F(ApexServicePrePostInstallTest, MultiPostinstall) {
-  constexpr const char* kLogcatText =
-      "sh      : /apex/com.android.apex.test_package/etc/sample_prebuilt_file";
-  RunPrePost(&IApexService::postinstallPackages,
-             {"apex.apexd_test_postinstall.apex", "apex.apexd_test.apex"},
-             kLogcatText);
-}
-
-TEST_F(ApexServicePrePostInstallTest, PostinstallFail) {
-  RunPrePost(&IApexService::postinstallPackages,
-             {"apex.apexd_test_prepostinstall.fail.apex"},
-             /* test_message= */ nullptr, /* expect_success= */ false);
 }
 
 TEST_F(ApexServiceTest, SubmitSingleSessionTestSuccess) {
@@ -1661,26 +1511,6 @@ TEST_F(ApexServiceRevertTest, RevertFailedStateRevertAttemptFails) {
   ASSERT_THAT(session_info, SessionInfoEq(expected));
 }
 
-TEST_F(ApexServiceRevertTest, RevertStoresCrashingNativeProcess) {
-  PrepareTestApexForInstall installer(GetTestFile("apex.apexd_test_v2.apex"));
-  if (!installer.Prepare()) {
-    return;
-  }
-  auto session = ApexSession::CreateSession(1543);
-  ASSERT_TRUE(IsOk(session));
-  ASSERT_TRUE(IsOk(session->UpdateStateAndCommit(SessionState::ACTIVATED)));
-
-  // Make sure /data/apex/active is non-empty.
-  ASSERT_TRUE(IsOk(service_->stagePackages({installer.test_file})));
-  std::string native_process = "test_process";
-  // TODO(ioffe): this is calling into internals of apexd which makes test quite
-  //  britle. With some refactoring we should be able to call binder api, or
-  //  make this a unit test of apexd.cpp.
-  Result<void> res = ::android::apex::RevertActiveSessions(native_process, "");
-  session = ApexSession::GetSession(1543);
-  ASSERT_EQ(session->GetCrashingNativeProcess(), native_process);
-}
-
 static pid_t GetPidOf(const std::string& name) {
   char buf[1024];
   const std::string cmd = std::string("pidof -s ") + name;
@@ -1838,18 +1668,15 @@ class ApexShimUpdateTest : public ApexServiceTest {
     }
     ApexServiceTest::SetUp();
 
-    // Assert that shim apex is pre-installed.
+    // Skip test if for some reason shim APEX is missing.
     std::vector<ApexInfo> list;
     ASSERT_TRUE(IsOk(service_->getAllPackages(&list)));
-    ApexInfo expected;
-    expected.moduleName = "com.android.apex.cts.shim";
-    expected.modulePath = "/system/apex/com.android.apex.cts.shim.apex";
-    expected.preinstalledModulePath =
-        "/system/apex/com.android.apex.cts.shim.apex";
-    expected.versionCode = 1;
-    expected.isFactory = true;
-    expected.isActive = true;
-    ASSERT_THAT(list, Contains(ApexInfoEq(expected)));
+    bool found = std::any_of(list.begin(), list.end(), [](const auto& apex) {
+      return apex.moduleName == "com.android.apex.cts.shim";
+    });
+    if (!found) {
+      GTEST_SKIP() << "Can't find com.android.apex.cts.shim";
+    }
   }
 };
 

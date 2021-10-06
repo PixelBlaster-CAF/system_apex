@@ -18,8 +18,6 @@
 
 #include "apex_file_repository.h"
 
-#include <unordered_map>
-
 #include <android-base/file.h>
 #include <android-base/properties.h>
 #include <android-base/result.h>
@@ -27,9 +25,12 @@
 #include <android-base/strings.h>
 #include <microdroid/metadata.h>
 
+#include <unordered_map>
+
 #include "apex_constants.h"
 #include "apex_file.h"
 #include "apexd_utils.h"
+#include "apexd_verity.h"
 
 using android::base::EndsWith;
 using android::base::Error;
@@ -105,6 +106,9 @@ android::base::Result<void> ApexFileRepository::AddPreInstalledApex(
 
 Result<void> ApexFileRepository::AddBlockApex(
     const std::string& metadata_partition) {
+  CHECK(!block_disk_path_.has_value())
+      << "AddBlockApex() can't be called twice.";
+
   // TODO(b/185069443) consider moving the logic to find disk_path from
   // metadata_partition to its own library
   LOG(INFO) << "Scanning " << metadata_partition << " for host apexes";
@@ -126,9 +130,20 @@ Result<void> ApexFileRepository::AddBlockApex(
     return {};
   }
 
-  const std::string disk_path(metadata_path_view);
+  block_disk_path_ = std::string(metadata_path_view);
 
-  // The first partition is "metadata".
+  // Read the payload metadata.
+  // "metadata" can be overridden by microdroid_manager. To ensure that
+  // "microdroid" is started with the same/unmodified set of host APEXes,
+  // microdroid stores APEXes' pubkeys in its encrypted instance disk. Next
+  // time, microdroid checks if there's pubkeys in the instance disk and use
+  // them to activate APEXes. Microdroid_manager passes pubkeys in instance.img
+  // via the following file.
+  if (auto exists = PathExists("/apex/vm-payload-metadata");
+      exists.ok() && *exists) {
+    metadata_realpath = "/apex/vm-payload-metadata";
+    LOG(INFO) << "Overriding metadata to " << metadata_realpath;
+  }
   auto metadata = android::microdroid::ReadMetadata(metadata_realpath);
   if (!metadata.ok()) {
     LOG(WARNING) << "Failed to load metadata from " << metadata_realpath
@@ -142,7 +157,7 @@ Result<void> ApexFileRepository::AddBlockApex(
     const auto& apex_config = metadata->apexes(i);
 
     const std::string apex_path =
-        disk_path + std::to_string(i + kFirstApexPartition);
+        *block_disk_path_ + std::to_string(i + kFirstApexPartition);
     auto apex_file = ApexFile::Open(apex_path);
     if (!apex_file.ok()) {
       return Error() << "Failed to open " << apex_path << " : "
@@ -151,19 +166,27 @@ Result<void> ApexFileRepository::AddBlockApex(
 
     // When metadata specifies the public key of the apex, it should match the
     // bundled key. Otherwise we accept it.
-    if (apex_config.publickey() != "" &&
-        apex_config.publickey() != apex_file->GetBundledPublicKey()) {
+    if (apex_config.public_key() != "" &&
+        apex_config.public_key() != apex_file->GetBundledPublicKey()) {
       return Error() << "public key doesn't match: " << apex_path;
     }
 
-    // TODO(b/185873258): metadata in repository to verify apexes with
-    // root_digest when given.
+    const std::string& name = apex_file->GetManifest().name();
+
+    // When metadata specifies the root digest of the apex, it should be used
+    // when activating the apex. So we need to keep it.
+    if (auto root_digest = apex_config.root_digest(); root_digest != "") {
+      auto hex_root_digest =
+          BytesToHex(reinterpret_cast<const uint8_t*>(root_digest.data()),
+                     root_digest.size());
+      block_apex_root_digests_.emplace(name, std::move(hex_root_digest));
+    }
 
     // APEX should be unique.
-    const std::string& name = apex_file->GetManifest().name();
     auto it = pre_installed_store_.find(name);
     if (it != pre_installed_store_.end()) {
-      return Error() << "duplicate found in " << it->second.GetPath();
+      return Error() << "duplicate of " << name << " found in "
+                     << it->second.GetPath();
     }
 
     pre_installed_store_.emplace(name, std::move(*apex_file));
@@ -268,6 +291,15 @@ Result<const std::string> ApexFileRepository::GetDataPath(
   return it->second.GetPath();
 }
 
+std::optional<std::string> ApexFileRepository::GetBlockApexRootDigest(
+    const std::string& name) const {
+  auto it = block_apex_root_digests_.find(name);
+  if (it == block_apex_root_digests_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 bool ApexFileRepository::HasPreInstalledVersion(const std::string& name) const {
   return pre_installed_store_.find(name) != pre_installed_store_.end();
 }
@@ -288,6 +320,11 @@ bool ApexFileRepository::IsPreInstalledApex(const ApexFile& apex) const {
     return false;
   }
   return it->second.GetPath() == apex.GetPath() || IsDecompressedApex(apex);
+}
+
+bool ApexFileRepository::IsBlockApex(const ApexFile& apex) const {
+  return block_disk_path_.has_value() &&
+         apex.GetPath().starts_with(*block_disk_path_);
 }
 
 std::vector<ApexFileRef> ApexFileRepository::GetPreInstalledApexFiles() const {
