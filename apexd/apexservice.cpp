@@ -63,6 +63,16 @@ BinderStatus CheckCallerIsRoot(const std::string& name) {
   return BinderStatus::ok();
 }
 
+BinderStatus CheckCallerSystemOrRoot(const std::string& name) {
+  uid_t uid = IPCThreadState::self()->getCallingUid();
+  if (uid != AID_ROOT && uid != AID_SYSTEM) {
+    std::string msg = "Only root and system_server are allowed to call " + name;
+    return BinderStatus::fromExceptionCode(BinderStatus::EX_SECURITY,
+                                           String8(name.c_str()));
+  }
+  return BinderStatus::ok();
+}
+
 class ApexService : public BnApexService {
  public:
   using BinderStatus = ::android::binder::Status;
@@ -85,10 +95,6 @@ class ApexService : public BnApexService {
   BinderStatus getActivePackage(const std::string& package_name,
                                 ApexInfo* aidl_return) override;
   BinderStatus getAllPackages(std::vector<ApexInfo>* aidl_return) override;
-  BinderStatus preinstallPackages(
-      const std::vector<std::string>& paths) override;
-  BinderStatus postinstallPackages(
-      const std::vector<std::string>& paths) override;
   BinderStatus abortStagedSession(int session_id) override;
   BinderStatus revertActiveSessions() override;
   BinderStatus resumeRevertIfNeeded() override;
@@ -137,6 +143,9 @@ BinderStatus ApexService::stagePackages(const std::vector<std::string>& paths) {
   if (!debug_check.isOk()) {
     return debug_check;
   }
+  if (auto is_root = CheckCallerIsRoot("stagePackages"); !is_root.isOk()) {
+    return is_root;
+  }
   LOG(DEBUG) << "stagePackages() received by ApexService, paths "
              << android::base::Join(paths, ',');
 
@@ -155,6 +164,10 @@ BinderStatus ApexService::stagePackages(const std::vector<std::string>& paths) {
 
 BinderStatus ApexService::unstagePackages(
     const std::vector<std::string>& paths) {
+  if (auto check = CheckCallerSystemOrRoot("unstagePackages"); !check.isOk()) {
+    return check;
+  }
+
   Result<void> res = ::android::apex::UnstagePackages(paths);
   if (res.ok()) {
     return BinderStatus::ok();
@@ -169,6 +182,11 @@ BinderStatus ApexService::unstagePackages(
 
 BinderStatus ApexService::submitStagedSession(const ApexSessionParams& params,
                                               ApexInfoList* apex_info_list) {
+  auto check = CheckCallerSystemOrRoot("submitStagedSession");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "submitStagedSession() received by ApexService, session id "
              << params.sessionId << " child sessions: ["
              << android::base::Join(params.childSessionIds, ',') << "]";
@@ -195,6 +213,11 @@ BinderStatus ApexService::submitStagedSession(const ApexSessionParams& params,
 }
 
 BinderStatus ApexService::markStagedSessionReady(int session_id) {
+  auto check = CheckCallerSystemOrRoot("markStagedSessionReady");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "markStagedSessionReady() received by ApexService, session id "
              << session_id;
   Result<void> success = ::android::apex::MarkStagedSessionReady(session_id);
@@ -209,6 +232,11 @@ BinderStatus ApexService::markStagedSessionReady(int session_id) {
 }
 
 BinderStatus ApexService::markStagedSessionSuccessful(int session_id) {
+  auto check = CheckCallerSystemOrRoot("markStagedSessionSuccessful");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG)
       << "markStagedSessionSuccessful() received by ApexService, session id "
       << session_id;
@@ -224,6 +252,11 @@ BinderStatus ApexService::markStagedSessionSuccessful(int session_id) {
 }
 
 BinderStatus ApexService::markBootCompleted() {
+  auto check = CheckCallerSystemOrRoot("markBootCompleted");
+  if (!check.isOk()) {
+    return check;
+  }
+
   ::android::apex::OnBootCompleted();
   return BinderStatus::ok();
 }
@@ -345,6 +378,11 @@ static std::string ToString(const ApexInfo& package) {
 
 BinderStatus ApexService::getSessions(
     std::vector<ApexSessionInfo>* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("getSessions");
+  if (!check.isOk()) {
+    return check;
+  }
+
   auto sessions = ApexSession::GetSessions();
   for (const auto& session : sessions) {
     ApexSessionInfo session_info;
@@ -357,6 +395,11 @@ BinderStatus ApexService::getSessions(
 
 BinderStatus ApexService::getStagedSessionInfo(
     int session_id, ApexSessionInfo* apex_session_info) {
+  auto check = CheckCallerSystemOrRoot("getStagedSessionInfo");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "getStagedSessionInfo() received by ApexService, session id "
              << session_id;
   auto session = ApexSession::GetSession(session_id);
@@ -374,6 +417,11 @@ BinderStatus ApexService::getStagedSessionInfo(
 
 BinderStatus ApexService::getStagedApexInfos(
     const ApexSessionParams& params, std::vector<ApexInfo>* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("getStagedApexInfos");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "getStagedApexInfos() received by ApexService, session id "
              << params.sessionId << " child sessions: ["
              << android::base::Join(params.childSessionIds, ',') << "]";
@@ -397,6 +445,11 @@ BinderStatus ApexService::getStagedApexInfos(
 
 BinderStatus ApexService::getActivePackages(
     std::vector<ApexInfo>* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("getActivePackages");
+  if (!check.isOk()) {
+    return check;
+  }
+
   auto packages = ::android::apex::GetActivePackages();
   for (const auto& package : packages) {
     ApexInfo apex_info = GetApexInfo(package);
@@ -409,6 +462,11 @@ BinderStatus ApexService::getActivePackages(
 
 BinderStatus ApexService::getActivePackage(const std::string& package_name,
                                            ApexInfo* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("getActivePackage");
+  if (!check.isOk()) {
+    return check;
+  }
+
   Result<ApexFile> apex = ::android::apex::GetActivePackage(package_name);
   if (apex.ok()) {
     *aidl_return = GetApexInfo(*apex);
@@ -418,6 +476,11 @@ BinderStatus ApexService::getActivePackage(const std::string& package_name,
 }
 
 BinderStatus ApexService::getAllPackages(std::vector<ApexInfo>* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("getAllPackages");
+  if (!check.isOk()) {
+    return check;
+  }
+
   const auto& active = ::android::apex::GetActivePackages();
   const auto& factory = ::android::apex::GetFactoryPackages();
   for (const ApexFile& pkg : active) {
@@ -438,6 +501,11 @@ BinderStatus ApexService::getAllPackages(std::vector<ApexInfo>* aidl_return) {
 
 BinderStatus ApexService::installAndActivatePackage(
     const std::string& package_path, ApexInfo* aidl_return) {
+  auto check = CheckCallerSystemOrRoot("installAndActivatePackage");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "installAndActivatePackage() received by ApexService, path: "
              << package_path;
   auto res = InstallPackage(package_path);
@@ -453,45 +521,12 @@ BinderStatus ApexService::installAndActivatePackage(
   return BinderStatus::ok();
 }
 
-BinderStatus ApexService::preinstallPackages(
-    const std::vector<std::string>& paths) {
-  BinderStatus debug_check = CheckDebuggable("preinstallPackages");
-  if (!debug_check.isOk()) {
-    return debug_check;
-  }
-
-  Result<void> res = ::android::apex::PreinstallPackages(paths);
-  if (res.ok()) {
-    return BinderStatus::ok();
-  }
-
-  LOG(ERROR) << "Failed to preinstall packages "
-             << android::base::Join(paths, ',') << ": " << res.error();
-  return BinderStatus::fromExceptionCode(
-      BinderStatus::EX_SERVICE_SPECIFIC,
-      String8(res.error().message().c_str()));
-}
-
-BinderStatus ApexService::postinstallPackages(
-    const std::vector<std::string>& paths) {
-  BinderStatus debug_check = CheckDebuggable("postinstallPackages");
-  if (!debug_check.isOk()) {
-    return debug_check;
-  }
-
-  Result<void> res = ::android::apex::PostinstallPackages(paths);
-  if (res.ok()) {
-    return BinderStatus::ok();
-  }
-
-  LOG(ERROR) << "Failed to postinstall packages "
-             << android::base::Join(paths, ',') << ": " << res.error();
-  return BinderStatus::fromExceptionCode(
-      BinderStatus::EX_SERVICE_SPECIFIC,
-      String8(res.error().message().c_str()));
-}
-
 BinderStatus ApexService::abortStagedSession(int session_id) {
+  auto check = CheckCallerSystemOrRoot("abortStagedSession");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "abortStagedSession() received by ApexService.";
   Result<void> res = ::android::apex::AbortStagedSession(session_id);
   if (!res.ok()) {
@@ -503,6 +538,11 @@ BinderStatus ApexService::abortStagedSession(int session_id) {
 }
 
 BinderStatus ApexService::revertActiveSessions() {
+  auto check = CheckCallerSystemOrRoot("revertActiveSessions");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "revertActiveSessions() received by ApexService.";
   Result<void> res = ::android::apex::RevertActiveSessions("", "");
   if (!res.ok()) {
@@ -519,6 +559,11 @@ BinderStatus ApexService::resumeRevertIfNeeded() {
     return debug_check;
   }
 
+  auto root_check = CheckCallerIsRoot("resumeRevertIfNeeded");
+  if (!root_check.isOk()) {
+    return root_check;
+  }
+
   LOG(DEBUG) << "resumeRevertIfNeeded() received by ApexService.";
   Result<void> res = ::android::apex::ResumeRevertIfNeeded();
   if (!res.ok()) {
@@ -531,6 +576,11 @@ BinderStatus ApexService::resumeRevertIfNeeded() {
 
 BinderStatus ApexService::snapshotCeData(int user_id, int rollback_id,
                                          const std::string& apex_name) {
+  auto check = CheckCallerSystemOrRoot("snapshotCeData");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "snapshotCeData() received by ApexService.";
   Result<void> res =
       ::android::apex::SnapshotCeData(user_id, rollback_id, apex_name);
@@ -544,6 +594,11 @@ BinderStatus ApexService::snapshotCeData(int user_id, int rollback_id,
 
 BinderStatus ApexService::restoreCeData(int user_id, int rollback_id,
                                         const std::string& apex_name) {
+  auto check = CheckCallerSystemOrRoot("restoreCeData");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "restoreCeData() received by ApexService.";
   Result<void> res =
       ::android::apex::RestoreCeData(user_id, rollback_id, apex_name);
@@ -556,6 +611,11 @@ BinderStatus ApexService::restoreCeData(int user_id, int rollback_id,
 }
 
 BinderStatus ApexService::destroyDeSnapshots(int rollback_id) {
+  auto check = CheckCallerSystemOrRoot("destroyDeSnapshots");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "destroyDeSnapshots() received by ApexService.";
   Result<void> res = ::android::apex::DestroyDeSnapshots(rollback_id);
   if (!res.ok()) {
@@ -567,6 +627,11 @@ BinderStatus ApexService::destroyDeSnapshots(int rollback_id) {
 }
 
 BinderStatus ApexService::destroyCeSnapshots(int user_id, int rollback_id) {
+  auto check = CheckCallerSystemOrRoot("destroyCeSnapshots");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "destroyCeSnapshots() received by ApexService.";
   Result<void> res = ::android::apex::DestroyCeSnapshots(user_id, rollback_id);
   if (!res.ok()) {
@@ -579,6 +644,11 @@ BinderStatus ApexService::destroyCeSnapshots(int user_id, int rollback_id) {
 
 BinderStatus ApexService::destroyCeSnapshotsNotSpecified(
     int user_id, const std::vector<int>& retain_rollback_ids) {
+  auto check = CheckCallerSystemOrRoot("destroyCeSnapshotsNotSpecified");
+  if (!check.isOk()) {
+    return check;
+  }
+
   LOG(DEBUG) << "destroyCeSnapshotsNotSpecified() received by ApexService.";
   Result<void> res = ::android::apex::DestroyCeSnapshotsNotSpecified(
       user_id, retain_rollback_ids);
@@ -751,12 +821,6 @@ status_t ApexService::shellCommand(int in, int out, int err,
         << std::endl
         << "  deactivatePackage [package_path] - deactivate package from the "
            "given path"
-        << std::endl
-        << "  preinstallPackages [package_path1] ([package_path2]...) - run "
-           "pre-install hooks of the given packages"
-        << std::endl
-        << "  postinstallPackages [package_path1] ([package_path2]...) - run "
-           "post-install hooks of the given packages"
         << std::endl
         << "  getStagedSessionInfo [sessionId] - displays information about a "
            "given session previously submitted"
@@ -964,31 +1028,6 @@ status_t ApexService::shellCommand(int in, int out, int err,
       return OK;
     }
     std::string msg = StringLog() << "Failed to submit session: "
-                                  << status.toString8().string() << std::endl;
-    dprintf(err, "%s", msg.c_str());
-    return BAD_VALUE;
-  }
-
-  if (cmd == String16("preinstallPackages") ||
-      cmd == String16("postinstallPackages")) {
-    if (args.size() < 2) {
-      print_help(err,
-                 "preinstallPackages/postinstallPackages requires at least"
-                 " one package_path");
-      return BAD_VALUE;
-    }
-    std::vector<std::string> pkgs;
-    pkgs.reserve(args.size() - 1);
-    for (size_t i = 1; i != args.size(); ++i) {
-      pkgs.emplace_back(String8(args[i]).string());
-    }
-    BinderStatus status = cmd == String16("preinstallPackages")
-                              ? preinstallPackages(pkgs)
-                              : postinstallPackages(pkgs);
-    if (status.isOk()) {
-      return OK;
-    }
-    std::string msg = StringLog() << "Failed to pre/postinstall package(s): "
                                   << status.toString8().string() << std::endl;
     dprintf(err, "%s", msg.c_str());
     return BAD_VALUE;
