@@ -204,6 +204,17 @@ apex {
 }
 
 apex {
+    name: "apex.apexd_test_erofs",
+    manifest: "manifest.json",
+    file_contexts: ":apex.test-file_contexts",
+    prebuilts: ["sample_prebuilt_file"],
+    key: "com.android.apex.test_package.key",
+    installable: false,
+    min_sdk_version: "current",
+    payload_fs_type: "erofs",
+}
+
+apex {
     name: "apex.apexd_test_no_hashtree",
     manifest: "manifest.json",
     file_contexts: ":apex.test-file_contexts",
@@ -294,6 +305,17 @@ apex {
     key: "com.android.apex.test_package.no_inst_key.key",
     installable: false,
     payload_fs_type: "f2fs",
+    updatable: false,
+}
+
+apex {
+    name: "apex.apexd_test_erofs_no_inst_key",
+    manifest: "manifest_no_inst_key.json",
+    file_contexts: ":apex.test-file_contexts",
+    prebuilts: ["sample_prebuilt_file"],
+    key: "com.android.apex.test_package.no_inst_key.key",
+    installable: false,
+    payload_fs_type: "erofs",
     updatable: false,
 }
 
@@ -487,4 +509,58 @@ android_app {
     apex_available: [
       "test.rebootless_apex_priv_app_in_apex",
     ],
+}
+
+apex_test {
+    name: "apex.apexd_test_classpath",
+    bootclasspath_fragments: ["apex.apexd_test_bootclasspath-fragment"],
+    systemserverclasspath_fragments: ["apex.apexd_test_systemserverclasspath-fragment"],
+    manifest: "manifest.json",
+    prebuilts: ["sample_prebuilt_file"],
+    key: "com.android.apex.test_package.key",
+    file_contexts: ":apex.test-file_contexts",
+    installable: false, // Should never be installed on the systemimage
+    updatable: false,
+}
+
+bootclasspath_fragment {
+    name: "apex.apexd_test_bootclasspath-fragment",
+    contents: ["test_framework-apexd"],
+}
+
+systemserverclasspath_fragment {
+    name: "apex.apexd_test_systemserverclasspath-fragment",
+    contents: ["test_service-apexd"],
+}
+
+java_sdk_library {
+    name: "test_framework-apexd",
+    defaults: ["framework-module-defaults"],
+    srcs: ["src/com/android/apex/test/Test.java"],
+    permitted_packages: ["com.android.apex.test"],
+    min_sdk_version: "30",
+
+    // Test only SDK, don't check against released APIs.
+    unsafe_ignore_missing_latest_api: true,
+    // Output the api files to a special directory that won't trigger an API
+    // review as it is a test only API.
+    api_dir: "apis_for_tests",
+    // Testing only.
+    no_dist: true,
+}
+
+java_sdk_library {
+    name: "test_service-apexd",
+    defaults: ["framework-system-server-module-defaults"],
+    srcs: ["src/com/android/apex/test/Test.java"],
+    permitted_packages: ["com.android.apex.test"],
+    min_sdk_version: "30",
+
+    // Test only SDK, don't check against released APIs.
+    unsafe_ignore_missing_latest_api: true,
+    // Output the api files to a special directory that won't trigger an API
+    // review as it is a test only API.
+    api_dir: "apis_for_tests",
+    // Testing only.
+    no_dist: true,
 }
