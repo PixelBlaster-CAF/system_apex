@@ -44,14 +44,6 @@ python_library_host {
     srcs: [
         "apex_manifest.py",
     ],
-    version: {
-        py2: {
-            enabled: true,
-        },
-        py3: {
-            enabled: true,
-        },
-    },
     libs: [
         "apex_manifest_proto",
     ],
@@ -67,12 +59,8 @@ python_binary_host {
         ":mke2fs_conf",
     ],
     version: {
-        py2: {
-            enabled: true,
-            embedded_launcher: true,
-        },
         py3: {
-            enabled: false,
+            embedded_launcher: true,
         },
     },
     libs: [
@@ -89,12 +77,8 @@ python_binary_host {
         "conv_apex_manifest.py",
     ],
     version: {
-        py2: {
-            enabled: true,
-            embedded_launcher: true,
-        },
         py3: {
-            enabled: false,
+            embedded_launcher: true,
         },
     },
     libs: [
@@ -139,19 +123,17 @@ python_test_host {
         "testdata/com.android.example.apex.pem",
         "testdata/com.android.example.apex.pk8",
         "testdata/com.android.example.apex.x509.pem",
+        "testdata/manifest_v1.xml",
+        "testdata/manifest_v2.xml",
     ],
-    version: {
-        py2: {
-            enabled: false,
-        },
-        py3: {
-            enabled: true,
-        },
-    },
     test_suites: ["general-tests"],
     libs: [
         "apex_manifest",
     ],
+    // TODO(b/210142956): re-enable once lab JDK is updated to match platform.
+    test_options: {
+        unit_test: false,
+    },
 }
 
 apexer_deps_minus_go_tools = apexer_tools + [
@@ -175,7 +157,7 @@ genrule {
     ],
     out: ["apexer_test_host_tools.zip"],
     tools: apexer_deps_tools + [
-        // To force signapk.jar generated in out/soong/host
+        // To force signapk.jar generated in out/host
         "signapk",
     ],
     cmd: "HOST_OUT_BIN=$$(dirname $(location apexer)) && " +
