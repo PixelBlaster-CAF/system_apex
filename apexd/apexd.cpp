@@ -3285,18 +3285,22 @@ void CollectApexInfoList(std::ostream& os,
       preinstalled_module_path = *preinstalled_path;
     }
 
-    std::optional<int64_t> mtime;
-    struct stat stat_buf;
-    if (stat(apex.GetPath().c_str(), &stat_buf) == 0) {
-      mtime.emplace(stat_buf.st_mtime);
-    } else {
-      PLOG(WARNING) << "Failed to stat " << apex.GetPath();
+    std::optional<int64_t> mtime =
+        instance.GetBlockApexLastUpdateSeconds(apex.GetManifest().name());
+    if (!mtime.has_value()) {
+      struct stat stat_buf;
+      if (stat(apex.GetPath().c_str(), &stat_buf) == 0) {
+        mtime.emplace(stat_buf.st_mtime);
+      } else {
+        PLOG(WARNING) << "Failed to stat " << apex.GetPath();
+      }
     }
     com::android::apex::ApexInfo apex_info(
         apex.GetManifest().name(), apex.GetPath(), preinstalled_module_path,
         apex.GetManifest().version(), apex.GetManifest().versionname(),
-        instance.IsPreInstalledApex(apex), is_active, mtime);
-    apex_infos.emplace_back(apex_info);
+        instance.IsPreInstalledApex(apex), is_active, mtime,
+        apex.GetManifest().providesharedapexlibs());
+    apex_infos.emplace_back(std::move(apex_info));
   };
   for (const auto& apex : active_apexs) {
     convert_to_autogen(apex, /* is_active= */ true);
@@ -3404,6 +3408,12 @@ int OnStartInVmMode() {
   }
 
   if (auto status = ActivateApexPackages(instance.GetPreInstalledApexFiles(),
+                                         ActivationMode::kVmMode);
+      !status.ok()) {
+    LOG(ERROR) << "Failed to activate apex packages : " << status.error();
+    return 1;
+  }
+  if (auto status = ActivateApexPackages(instance.GetDataApexFiles(),
                                          ActivationMode::kVmMode);
       !status.ok()) {
     LOG(ERROR) << "Failed to activate apex packages : " << status.error();
@@ -3575,7 +3585,8 @@ int ActivateFlattenedApex() {
                               /* versionCode= */ manifest->version(),
                               /* versionName= */ manifest->versionname(),
                               /* isFactory= */ true, /* isActive= */ true,
-                              /* lastUpdateMillis= */ 0);
+                              /* lastUpdateMillis= */ 0,
+                              /* provideSharedApexLibs= */ false);
     }
   }
 
